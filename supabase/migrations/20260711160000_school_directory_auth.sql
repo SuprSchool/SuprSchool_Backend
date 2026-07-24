@@ -1,0 +1,35 @@
+alter type public.roster_claim_status rename to school_directory_entry_status;
+
+alter table public.roster_identities rename to school_directory_entries;
+alter table public.roster_teacher_assignments rename to school_directory_teacher_assignments;
+
+alter table public.school_directory_teacher_assignments
+  rename column roster_identity_id to school_directory_entry_id;
+
+alter table public.school_directory_entries
+  drop constraint roster_identities_school_id_phone_e164_role_key;
+
+alter table public.school_directory_entries
+  add constraint school_directory_entries_phone_e164_unique unique (phone_e164);
+
+alter table public.school_directory_entries
+  rename constraint roster_identities_pkey to school_directory_entries_pkey;
+alter table public.school_directory_entries
+  rename constraint roster_identities_school_id_fkey to school_directory_entries_school_id_fkey;
+alter table public.school_directory_entries
+  rename constraint roster_identities_student_class_id_fkey to school_directory_entries_student_class_id_fkey;
+alter table public.school_directory_entries
+  rename constraint roster_identities_check to school_directory_entries_check;
+
+alter table public.school_directory_teacher_assignments
+  rename constraint roster_teacher_assignments_pkey to school_directory_teacher_assignments_pkey;
+alter table public.school_directory_teacher_assignments
+  rename constraint roster_teacher_assignments_roster_identity_id_fkey to school_directory_teacher_assignments_school_directory_entry_id_fkey;
+alter table public.school_directory_teacher_assignments
+  rename constraint roster_teacher_assignments_class_id_fkey to school_directory_teacher_assignments_class_id_fkey;
+alter table public.school_directory_teacher_assignments
+  rename constraint roster_teacher_assignments_subject_id_fkey to school_directory_teacher_assignments_subject_id_fkey;
+
+alter index public.roster_identity_eligible_lookup rename to school_directory_entries_eligible_lookup;
+
+alter index public.roster_teacher_assignments_roster_identity_id_class_id_subj_key rename to school_directory_teacher_assignments_unique;

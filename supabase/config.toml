@@ -1,0 +1,4 @@
+project_id = "suprschool-backend"
+
+[db.migrations]
+schema_paths = ["./schemas/*.sql"]
