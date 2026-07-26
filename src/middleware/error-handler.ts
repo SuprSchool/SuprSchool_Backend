@@ -2,7 +2,17 @@ import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 
 import { AppError, toAppError } from '../lib/errors.js';
+import { logger } from '../lib/logger.js';
 import type { ApiErrorResponse } from '../types/api.js';
+
+function safeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+
+  return message.replace(
+    /\b([a-z][a-z\d+.-]*:\/\/)[^/\s@]+@/gi,
+    (_match, protocol: string) => protocol + '[REDACTED]@',
+  );
+}
 
 export function notFoundHandler(
   _request: Request,
@@ -14,7 +24,7 @@ export function notFoundHandler(
 
 export function errorHandler(
   error: unknown,
-  _request: Request,
+  request: Request,
   response: Response,
   _next: NextFunction,
 ): void {
@@ -31,6 +41,18 @@ export function errorHandler(
   const requestId = typeof response.locals.requestId === 'string'
     ? response.locals.requestId
     : 'unknown';
+
+  if (appError.status >= 500) {
+    logger.error({
+      errorCode: appError.code,
+      errorMessage: safeErrorMessage(error),
+      errorName: error instanceof Error ? error.name : typeof error,
+      method: request.method,
+      path: request.path,
+      requestId,
+      status: appError.status,
+    }, 'request failed');
+  }
 
   const body: ApiErrorResponse = {
     error: {
