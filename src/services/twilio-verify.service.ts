@@ -1,4 +1,5 @@
 import { AppError } from '../lib/errors.js';
+import { logger } from '../lib/logger.js';
 
 export type OtpPurpose = 'signup' | 'password_reset';
 
@@ -66,6 +67,16 @@ export function createTwilioVerifyAdapter(options: TwilioVerifyOptions): OtpVeri
     });
 
     if (!response.ok) {
+      const body = await response.clone().json().catch(() => undefined) as { code?: unknown } | undefined;
+      const twilioErrorCode = typeof body?.code === 'number' ? body.code : undefined;
+      logger.warn(
+        {
+          operation: path === 'Verifications' ? 'start' : 'check',
+          ...(twilioErrorCode === undefined ? {} : { twilioErrorCode }),
+          twilioStatus: response.status,
+        },
+        'Twilio Verify request failed',
+      );
       throw new AppError('INTERNAL_ERROR', 503, 'Verification service is temporarily unavailable');
     }
     return response.json() as Promise<Record<string, unknown>>;
