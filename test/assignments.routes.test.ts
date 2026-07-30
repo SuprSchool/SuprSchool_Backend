@@ -580,6 +580,25 @@ describe('assignment review regressions', () => {
     expect(queries.some((query) => query.includes('insert into') && query.includes('class_subjects'))).toBe(true);
   });
 
+  it('binds an ISO timestamp, not a Date object, when creating an assignment', async () => {
+    const parameters: unknown[][] = [];
+    const callback: RemoteCallback = async (_query, params) => {
+      parameters.push(params);
+      return { rows: [] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      databaseWithTransaction(callback),
+    );
+
+    await repository.create(
+      { schoolId, userId: teacherId },
+      'c1',
+      validAssignment as Parameters<AssignmentsRepository['create']>[2],
+    );
+
+    expect(parameters.flat().some((value) => value instanceof Date)).toBe(false);
+  });
+
   it('requires a live class-subject assignment inside the resource insert mutation', async () => {
     const queries: string[] = [];
     const callback: RemoteCallback = async (query) => {

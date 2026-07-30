@@ -612,6 +612,25 @@ describe('academic service cache wiring', () => {
 });
 
 describe('database idempotency lease recovery', () => {
+  it('persists a JSON null response for a successful no-content operation', async () => {
+    const execute = vi.fn().mockResolvedValue([]);
+    const store = new DatabaseIdempotencyRecordStore({ execute } as unknown as Database);
+
+    await store.complete(schoolId, teacherId, 'delete-resource', { body: undefined, status: 204 });
+    await store.completeOwned(
+      schoolId,
+      teacherId,
+      'delete-resource-owned',
+      'a'.repeat(64),
+      '2026-07-30T00:00:00.000Z',
+      { body: undefined, status: 204 },
+    );
+
+    const rendered = execute.mock.calls.map(([query]) => pgDialect.sqlToQuery(query as SQL));
+    expect(rendered.every((query) => query.params.includes('null'))).toBe(true);
+    expect(rendered.flatMap((query) => query.params)).not.toContain(undefined);
+  });
+
   it('atomically reclaims only the matching expired pending request', async () => {
     const leaseToken = '2026-07-29 18:40:00+00';
     const execute = vi.fn().mockResolvedValue([{ lease_expires_at: leaseToken }]);

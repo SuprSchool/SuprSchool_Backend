@@ -430,7 +430,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           ${identity.userId}::uuid,
           ${input.title},
           ${input.instructions},
-          ${new Date(input.dueAt)}::timestamptz,
+          ${input.dueAt}::timestamptz,
           ${input.isGradedAssignment},
           ${input.gradingType},
           ${input.maxMarks ?? null}

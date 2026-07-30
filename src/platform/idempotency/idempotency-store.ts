@@ -425,7 +425,7 @@ export class DatabaseIdempotencyRecordStore implements IdempotencyRecordStore {
     const completed = await this.db.execute(sql<{ idempotency_key: string }>`
       update public.api_idempotency_keys
       set response_status = ${response.status},
-          response_body = ${JSON.stringify(response.body)}::jsonb,
+          response_body = ${JSON.stringify(response.body ?? null)}::jsonb,
           completed_at = now()
       where school_id = ${schoolId}::uuid
         and user_id = ${userId}::uuid
@@ -447,7 +447,7 @@ export class DatabaseIdempotencyRecordStore implements IdempotencyRecordStore {
     await this.db.execute(sql`
       update public.api_idempotency_keys
       set response_status = ${response.status},
-          response_body = ${JSON.stringify(response.body)}::jsonb,
+          response_body = ${JSON.stringify(response.body ?? null)}::jsonb,
           completed_at = now()
       where school_id = ${schoolId}::uuid
         and user_id = ${userId}::uuid
