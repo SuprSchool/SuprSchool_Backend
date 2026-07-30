@@ -88,7 +88,7 @@ describe('recording Storage lifecycle', () => {
       confirmTusAudioUpload: vi.fn(async () => {
         expect(storedObjects.has(audioObjectPath)).toBe(true);
         return {
-          bitrateBps: 128_000, channels: 1, codec: 'aac-lc',
+          bitrateBps: 96_000, channels: 1, codec: 'aac-lc',
           contentType: 'audio/mp4', durationMs: 1_000,
           fileExtension: '.m4a', objectPath: audioObjectPath, sizeBytes: 4,
         };
