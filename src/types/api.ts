@@ -2,6 +2,8 @@ import type {
   AppIdentity,
   AuthenticatedResult,
   LoginInput,
+  SignupProfileInput,
+  SignupProfilePreview,
   SignupCompleteInput,
   SignupStartInput,
   SignupVerifyInput,
@@ -15,6 +17,8 @@ export interface SignupStartResponse { status: 'otp_sent'; }
 export interface OtpVerifiedResponse { status: 'otp_verified'; }
 export type SignupStartRequest = SignupStartInput;
 export type SignupVerifyRequest = SignupVerifyInput;
+export type SignupProfileRequest = SignupProfileInput;
+export type SignupProfileResponse = SignupProfilePreview;
 export type SignupCompleteRequest = SignupCompleteInput;
 export type LoginRequest = LoginInput;
 export type SignupCompleteResponse = AuthenticatedResult;

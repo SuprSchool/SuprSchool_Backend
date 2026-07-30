@@ -33,6 +33,14 @@ export interface IdempotencyRecordStore {
     key: string,
     response: IdempotencyResponse,
   ): Promise<void>;
+  completeOwned?(
+    schoolId: string,
+    userId: string,
+    key: string,
+    requestHash: string,
+    leaseToken: string,
+    response: IdempotencyResponse,
+  ): Promise<boolean>;
   create(record: IdempotencyRecord): Promise<boolean>;
   deletePending?(
     schoolId: string,
@@ -40,6 +48,19 @@ export interface IdempotencyRecordStore {
     key: string,
     requestHash: string,
   ): Promise<void>;
+  reclaimExpired?(
+    schoolId: string,
+    userId: string,
+    key: string,
+    requestHash: string,
+  ): Promise<string | undefined>;
+  releaseOwned?(
+    schoolId: string,
+    userId: string,
+    key: string,
+    requestHash: string,
+    leaseToken: string,
+  ): Promise<boolean>;
   find(
     schoolId: string,
     userId: string,
@@ -49,10 +70,19 @@ export interface IdempotencyRecordStore {
 }
 
 export type IdempotencyClaim =
-  | { requestHash: string; state: "claimed" }
+  | { leaseToken: string; requestHash: string; state: "claimed" }
   | { state: "expired" }
   | { state: "in_progress" }
   | { response: IdempotencyResponse; state: "completed" };
+
+export type IdempotencyCompletionResult =
+  | { response: IdempotencyResponse; state: "completed" }
+  | { state: "ownership_lost" };
+
+export type IdempotencyReleaseResult =
+  | { response: IdempotencyResponse; state: "completed" }
+  | { state: "ownership_lost" }
+  | { state: "released" };
 
 export class IdempotencyConflictError extends Error {
   public readonly code = "IDEMPOTENCY_CONFLICT";
@@ -68,8 +98,10 @@ export class IdempotencyStore {
 
   public async claim(request: IdempotencyRequest): Promise<IdempotencyClaim> {
     const requestHash = hashCanonicalRequest(request.requestBody);
+    const leaseToken = new Date(Date.now() + 600_000).toISOString();
     const created = await this.records.create({
       key: request.key,
+      leaseExpiresAt: leaseToken,
       requestHash,
       responseBody: null,
       responseStatus: null,
@@ -77,7 +109,7 @@ export class IdempotencyStore {
       userId: request.userId,
     });
     if (created) {
-      return { requestHash, state: "claimed" };
+      return { leaseToken, requestHash, state: "claimed" };
     }
 
     const existing = await this.records.find(
@@ -135,6 +167,45 @@ export class IdempotencyStore {
     );
   }
 
+  public async completeOwned(
+    request: IdempotencyRequest,
+    leaseToken: string,
+    response: IdempotencyResponse,
+  ): Promise<IdempotencyCompletionResult> {
+    if (this.records.completeOwned === undefined) {
+      throw new Error('Idempotency record store must implement fenced completion');
+    }
+    const requestHash = hashCanonicalRequest(request.requestBody);
+    const completed = await this.records.completeOwned(
+      request.schoolId,
+      request.userId,
+      request.key,
+      requestHash,
+      leaseToken,
+      response,
+    );
+    if (completed) return { response, state: 'completed' };
+
+    const existing = await this.records.find(
+      request.schoolId,
+      request.userId,
+      request.key,
+    );
+    if (existing !== undefined && existing.requestHash !== requestHash) {
+      throw new IdempotencyConflictError();
+    }
+    if (existing?.responseStatus !== null && existing?.responseStatus !== undefined) {
+      return {
+        response: {
+          body: existing.responseBody,
+          status: existing.responseStatus,
+        },
+        state: 'completed',
+      };
+    }
+    return { state: 'ownership_lost' };
+  }
+
   public async failClosed(request: IdempotencyRequest): Promise<void> {
     const existing = await this.records.find(
       request.schoolId,
@@ -154,6 +225,55 @@ export class IdempotencyStore {
       body: { code: "IDEMPOTENCY_COMPLETION_UNAVAILABLE" },
       status: 503,
     });
+  }
+
+  public async reclaimExpired(request: IdempotencyRequest): Promise<string | undefined> {
+    if (this.records.reclaimExpired === undefined) {
+      throw new Error('Idempotency record store must implement atomic expired-lease reclamation');
+    }
+    return this.records.reclaimExpired(
+      request.schoolId,
+      request.userId,
+      request.key,
+      hashCanonicalRequest(request.requestBody),
+    );
+  }
+
+  public async releaseOwned(
+    request: IdempotencyRequest,
+    leaseToken: string,
+  ): Promise<IdempotencyReleaseResult> {
+    if (this.records.releaseOwned === undefined) {
+      throw new Error('Idempotency record store must implement fenced release');
+    }
+    const requestHash = hashCanonicalRequest(request.requestBody);
+    const released = await this.records.releaseOwned(
+      request.schoolId,
+      request.userId,
+      request.key,
+      requestHash,
+      leaseToken,
+    );
+    if (released) return { state: 'released' };
+
+    const existing = await this.records.find(
+      request.schoolId,
+      request.userId,
+      request.key,
+    );
+    if (existing !== undefined && existing.requestHash !== requestHash) {
+      throw new IdempotencyConflictError();
+    }
+    if (existing?.responseStatus !== null && existing?.responseStatus !== undefined) {
+      return {
+        response: {
+          body: existing.responseBody,
+          status: existing.responseStatus,
+        },
+        state: 'completed',
+      };
+    }
+    return { state: 'ownership_lost' };
   }
 
   public async release(request: IdempotencyRequest): Promise<void> {
@@ -188,18 +308,21 @@ export class DatabaseIdempotencyRecordStore implements IdempotencyRecordStore {
   public constructor(private readonly db: Database) {}
 
   public async create(record: IdempotencyRecord): Promise<boolean> {
+    const leaseExpiresAt = record.leaseExpiresAt ?? new Date(Date.now() + 600_000).toISOString();
     const rows = await this.db.execute(sql<{ school_id: string }>`
       insert into public.api_idempotency_keys (
         school_id,
         user_id,
         idempotency_key,
-        request_hash
+        request_hash,
+        lease_expires_at
       )
       values (
         ${record.schoolId}::uuid,
         ${record.userId}::uuid,
         ${record.key},
-        ${record.requestHash}
+        ${record.requestHash},
+        ${leaseExpiresAt}::timestamptz
       )
       on conflict (school_id, user_id, idempotency_key) do nothing
       returning school_id
@@ -260,6 +383,26 @@ export class DatabaseIdempotencyRecordStore implements IdempotencyRecordStore {
     };
   }
 
+  public async reclaimExpired(
+    schoolId: string,
+    userId: string,
+    key: string,
+    requestHash: string,
+  ): Promise<string | undefined> {
+    const reclaimed = await this.db.execute(sql<{ lease_expires_at: string }>`
+      update public.api_idempotency_keys
+      set lease_expires_at = clock_timestamp() + interval '10 minutes'
+      where school_id = ${schoolId}::uuid
+        and user_id = ${userId}::uuid
+        and idempotency_key = ${key}
+        and request_hash = ${requestHash}
+        and response_status is null
+        and lease_expires_at <= clock_timestamp()
+      returning lease_expires_at::text as lease_expires_at
+    `);
+    return (reclaimed as unknown as ReadonlyArray<{ lease_expires_at: string }>)[0]?.lease_expires_at;
+  }
+
   public async deletePending(
     schoolId: string,
     userId: string,
@@ -269,6 +412,30 @@ export class DatabaseIdempotencyRecordStore implements IdempotencyRecordStore {
     await this.db.execute(
       sql`delete from public.api_idempotency_keys where school_id = ${schoolId}::uuid and user_id = ${userId}::uuid and idempotency_key = ${key} and request_hash = ${requestHash} and response_status is null`,
     );
+  }
+
+  public async completeOwned(
+    schoolId: string,
+    userId: string,
+    key: string,
+    requestHash: string,
+    leaseToken: string,
+    response: IdempotencyResponse,
+  ): Promise<boolean> {
+    const completed = await this.db.execute(sql<{ idempotency_key: string }>`
+      update public.api_idempotency_keys
+      set response_status = ${response.status},
+          response_body = ${JSON.stringify(response.body)}::jsonb,
+          completed_at = now()
+      where school_id = ${schoolId}::uuid
+        and user_id = ${userId}::uuid
+        and idempotency_key = ${key}
+        and request_hash = ${requestHash}
+        and lease_expires_at = ${leaseToken}::timestamptz
+        and response_status is null
+      returning idempotency_key
+    `);
+    return (completed as unknown as ReadonlyArray<{ idempotency_key: string }>).length > 0;
   }
 
   public async complete(
@@ -289,6 +456,26 @@ export class DatabaseIdempotencyRecordStore implements IdempotencyRecordStore {
     `);
   }
 
+  public async releaseOwned(
+    schoolId: string,
+    userId: string,
+    key: string,
+    requestHash: string,
+    leaseToken: string,
+  ): Promise<boolean> {
+    const released = await this.db.execute(sql<{ idempotency_key: string }>`
+      delete from public.api_idempotency_keys
+      where school_id = ${schoolId}::uuid
+        and user_id = ${userId}::uuid
+        and idempotency_key = ${key}
+        and request_hash = ${requestHash}
+        and lease_expires_at = ${leaseToken}::timestamptz
+        and response_status is null
+      returning idempotency_key
+    `);
+    return (released as unknown as ReadonlyArray<{ idempotency_key: string }>).length > 0;
+  }
+
   public async release(
     schoolId: string,
     userId: string,
@@ -302,6 +489,23 @@ export class DatabaseIdempotencyRecordStore implements IdempotencyRecordStore {
         and response_status is null
     `);
   }
+}
+
+export function deterministicIdempotencyUuid(input: {
+  key: string;
+  schoolId: string;
+  userId: string;
+}): string {
+  const bytes = Buffer.from(hashCanonicalRequest(input), 'hex').subarray(0, 16);
+  const versionByte = bytes.at(6);
+  const variantByte = bytes.at(8);
+  if (versionByte === undefined || variantByte === undefined) {
+    throw new Error('Idempotency hash is unexpectedly shorter than a UUID');
+  }
+  bytes[6] = (versionByte & 0x0f) | 0x80;
+  bytes[8] = (variantByte & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export function hashCanonicalRequest(requestBody: unknown): string {

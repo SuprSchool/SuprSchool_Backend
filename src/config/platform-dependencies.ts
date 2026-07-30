@@ -230,12 +230,14 @@ export function createStorageCleanupHandler(
   return async (message): Promise<void> => {
     const candidates = await cleanupDatabase.execute(sql<{
       bucket: string;
+      event_resource_id: string | null;
       object_path: string;
       upload_session_id: string | null;
     }>`
-      select distinct bucket, object_path, upload_session_id
+      select distinct bucket, object_path, upload_session_id, event_resource_id
       from (
-        select bucket, object_path, id::text as upload_session_id
+        select bucket, object_path, id::text as upload_session_id,
+          null::text as event_resource_id
         from public.upload_sessions
         where school_id = ${message.schoolId}::uuid
           and status = 'pending'
@@ -255,9 +257,14 @@ export function createStorageCleanupHandler(
             union all
             select 1 from public.recording_resources resource
             where resource.upload_session_id = upload_sessions.id
+            union all
+            select 1 from public.event_resources resource
+            where resource.upload_session_id = upload_sessions.id
+              and resource.confirmed_at is not null
           )
         union
-        select 'academic-files'::text as bucket, resource.object_path, null::text as upload_session_id
+        select 'academic-files'::text as bucket, resource.object_path,
+          null::text as upload_session_id, null::text as event_resource_id
         from public.assignment_resources resource
         inner join public.assignments assignment
           on assignment.id = resource.assignment_id
@@ -265,7 +272,8 @@ export function createStorageCleanupHandler(
         where resource.school_id = ${message.schoolId}::uuid
           and assignment.deleted_at is not null
         union
-        select 'academic-files'::text as bucket, submission.object_path, null::text as upload_session_id
+        select 'academic-files'::text as bucket, submission.object_path,
+          null::text as upload_session_id, null::text as event_resource_id
         from public.assignment_submissions submission
         inner join public.assignments assignment
           on assignment.id = submission.assignment_id
@@ -274,15 +282,26 @@ export function createStorageCleanupHandler(
           and assignment.deleted_at is not null
           and submission.object_path is not null
         union
-        select 'academic-files'::text as bucket, resource.object_path, null::text as upload_session_id
+        select 'academic-files'::text as bucket, resource.object_path,
+          null::text as upload_session_id, null::text as event_resource_id
         from public.exam_resources resource
         inner join public.class_exams exam
           on exam.id = resource.assessment_id
           and exam.school_id = resource.school_id
         where resource.school_id = ${message.schoolId}::uuid
           and exam.deleted_at is not null
+        union
+        select 'academic-files'::text as bucket, resource.object_path,
+          null::text as upload_session_id, resource.id::text as event_resource_id
+        from public.event_resources resource
+        inner join public.events event
+          on event.id = resource.event_id
+          and event.school_id = resource.school_id
+        where resource.school_id = ${message.schoolId}::uuid
+          and event.deleted_at is not null
       ) cleanup_objects
       where upload_session_id is not null
+        or event_resource_id is not null
         or not exists (
           select 1
           from public.academic_storage_cleanup_objects cleaned
@@ -296,6 +315,7 @@ export function createStorageCleanupHandler(
     const handledSessionIds: string[] = [];
     for (const row of candidates as unknown as ReadonlyArray<{
       bucket: string;
+      event_resource_id: string | null;
       object_path: string;
       upload_session_id: string | null;
     }>) {
@@ -303,6 +323,18 @@ export function createStorageCleanupHandler(
         await remover.remove(row.bucket, row.object_path);
       } catch (error) {
         if (!isStorageObjectNotFound(error)) throw error;
+      }
+      if (row.event_resource_id !== null && row.event_resource_id !== undefined) {
+        await cleanupDatabase.execute(sql`
+          delete from public.event_resources resource
+          using public.events event
+          where resource.id = ${row.event_resource_id}::uuid
+            and resource.school_id = ${message.schoolId}::uuid
+            and event.id = resource.event_id
+            and event.school_id = resource.school_id
+            and event.deleted_at is not null
+        `);
+        continue;
       }
       if (row.upload_session_id === null) {
         await cleanupDatabase.execute(sql`

@@ -14,6 +14,13 @@ function safeErrorMessage(error: unknown): string {
   );
 }
 
+function isMalformedJsonError(error: unknown): boolean {
+  return error instanceof SyntaxError
+    && typeof error === 'object'
+    && error !== null
+    && (error as { type?: unknown }).type === 'entity.parse.failed';
+}
+
 export function notFoundHandler(
   _request: Request,
   _response: Response,
@@ -35,7 +42,7 @@ export function errorHandler(
       && error !== null
       && Array.isArray((error as { issues?: unknown }).issues)
     );
-  const appError = isValidationError
+  const appError = isValidationError || isMalformedJsonError(error)
     ? new AppError('VALIDATION_ERROR', 400, 'Invalid request')
     : toAppError(error);
   const requestId = typeof response.locals.requestId === 'string'

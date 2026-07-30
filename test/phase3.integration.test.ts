@@ -3,6 +3,7 @@ import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 
 import { createApp, type AppDependencies } from '../src/app.js';
+import type { IdempotencyStore } from '../src/platform/idempotency/idempotency-store.js';
 import type { DiaryService } from '../src/services/diary.service.js';
 import type { EventsService } from '../src/services/events.service.js';
 import type { RecordingService } from '../src/services/recordings.service.js';
@@ -27,6 +28,8 @@ function createEventsService(): EventsService {
     createEvent: vi.fn(),
     createManagedTeam: vi.fn(),
     createTeam: vi.fn(),
+    confirmResourceUpload: vi.fn(),
+    deleteResource: vi.fn(),
     deleteTeam: vi.fn(),
     getStudentEvent: vi.fn(),
     getStudentResults: vi.fn(),
@@ -36,11 +39,18 @@ function createEventsService(): EventsService {
     listStudentParticipants: vi.fn(),
     listStudentTeams: vi.fn(),
     listParticipants: vi.fn(),
+    listClassOptions: vi.fn(),
+    listMemberOptions: vi.fn(),
     listStudentEvents: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     listTeacherEvents: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     listTeams: vi.fn(),
     publishResults: vi.fn(),
+    requestResourceUploadSession: vi.fn(),
+    recoverCreatedStudentTeam: vi.fn(),
+    recoverCreatedManagedTeam: vi.fn(),
     registerStudent: vi.fn(),
+    recoverCreatedEvent: vi.fn(),
+    recoverUpdatedEvent: vi.fn(),
     tagParticipation: vi.fn(),
     replaceManagingTeam: vi.fn(),
     replaceTeams: vi.fn(),
@@ -92,6 +102,7 @@ describe('Phase 3 runtime integration', () => {
     const dependencies: AppDependencies = {
       authenticate,
       diaryService,
+      eventMetadataIdempotency: {} as IdempotencyStore,
       eventsService,
       recordingsService,
     };

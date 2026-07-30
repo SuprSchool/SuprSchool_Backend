@@ -173,7 +173,7 @@ describe('DrizzleEventsRepository lifecycle, authorization, and outbox guarantee
     const priorStates = [[], [{ userId: memberA, memberType: 'student', role: 'Lead' }], [{ userId: memberB, memberType: 'student', role: 'Lead' }]];
     const database = new RecordingDatabase((query) => {
       if (query.sql.includes('where e.id =') && query.sql.includes('for update of e, role')) return [{ id: eventId, managerRevision }];
-      if (query.sql.includes('select requested.user_id as "userId"')) return [{ userId: memberA }];
+      if (query.sql.includes('select requested."userId" as "userId"')) return [{ userId: memberA }];
       if (query.sql.includes('select manager.user_id as "userId"') && !query.sql.includes('profile.display_name')) return priorStates.shift() ?? [];
       if (query.sql.includes('update public.events set manager_revision')) return [{ managerRevision: ++managerRevision }];
       return [];
@@ -219,6 +219,7 @@ describe('DrizzleEventsRepository lifecycle, authorization, and outbox guarantee
     const common = {
       activityKind: 'event',
       startsAt: '2026-07-20T10:00:00.000Z',
+      registrationDeadlineAt: '2026-07-19T10:00:00.000Z',
       targetClassIds: ['11111111-1111-4111-8111-111111111111'],
       title: 'Science fair',
     };
@@ -242,6 +243,33 @@ describe('DrizzleEventsRepository lifecycle, authorization, and outbox guarantee
       .rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 } satisfies Partial<AppError>);
     expect(database.queries[0]?.sql).toContain('public.event_audiences');
     expect(database.queries[0]?.sql).toContain('public.class_members');
+  });
+
+  it.each([
+    { creatorId: studentId, creatorRole: 'student' as const },
+    { creatorId: teacherId, creatorRole: 'teacher' as const },
+  ])('returns a committed $creatorRole team before validation or another insert', async ({ creatorId, creatorRole }) => {
+    const recoveredTeam = { id: memberA, memberCount: 2, name: 'Sparta' };
+    const database = new RecordingDatabase((query) => {
+      if (query.sql.includes('for update of e, role')) {
+        return creatorRole === 'teacher' ? ownedEventRow() : [{ id: eventId }];
+      }
+      if (query.sql.includes('count(member.student_id)::integer')) return [recoveredTeam];
+      return [];
+    });
+    const repository = new DrizzleEventsRepository(database.asDatabase());
+    const input = { memberStudentIds: [studentId, memberB], name: 'Sparta' };
+
+    const result = creatorRole === 'student'
+      ? await repository.createTeam({ schoolId, userId: creatorId }, eventId, memberA, input)
+      : await repository.createManagedTeam({ schoolId, userId: creatorId }, eventId, memberA, input);
+
+    expect(result).toEqual(recoveredTeam);
+    expect(database.queries.some((query) => query.sql.includes('insert into public.event_teams'))).toBe(false);
+    const recovery = database.queries.find((query) => query.sql.includes('count(member.student_id)::integer'));
+    expect(recovery?.sql).toContain(`team.created_by_${creatorRole}_id`);
+    expect(recovery?.sql).toContain('public.event_domain_outbox');
+    expect(recovery?.params).toContain(creatorRole);
   });
 
   it('accepts every Events outbox payload shape in the queue handler contract', async () => {
@@ -278,7 +306,7 @@ describe('DrizzleEventsRepository lifecycle, authorization, and outbox guarantee
     const priorStates = [[], [{ userId: memberA, memberType: 'student', role: 'Lead' }]];
     const database = new RecordingDatabase((query) => {
       if (query.sql.includes('where e.id =') && query.sql.includes('for update of e, role')) return [{ id: eventId }];
-      if (query.sql.includes('select requested.user_id as "userId"')) return [{ userId: memberA }];
+      if (query.sql.includes('select requested."userId" as "userId"')) return [{ userId: memberA }];
       if (query.sql.includes('select manager.user_id as "userId"') && !query.sql.includes('profile.display_name')) return priorStates.shift() ?? [];
       if (query.sql.includes('update public.events set manager_revision')) return [{ managerRevision: ++managerRevision }];
       return [];
@@ -381,5 +409,53 @@ describe('DrizzleEventsRepository lifecycle, authorization, and outbox guarantee
     const insertIndex = transaction.findIndex((query) => query.sql.includes('insert into public.event_team_members'));
     expect(deleteIndex).toBeGreaterThanOrEqual(0);
     expect(insertIndex).toBeGreaterThan(deleteIndex);
+  });
+
+  it('persists and clears manager contact through exact JSON mapping and durable outbox payloads', async () => {
+    const database = new RecordingDatabase((query) => {
+      if (query.sql.includes('where e.id =') && query.sql.includes('for update of e, role')) {
+        return [{ id: eventId }];
+      }
+      if (query.sql.includes('select requested."userId" as "userId"')) return [{ userId: memberA }];
+      if (query.sql.includes('select manager.user_id as "userId"') && !query.sql.includes('profile.display_name')) return [];
+      if (query.sql.includes('update public.events set manager_revision')) return [{ managerRevision: 1 }];
+      if (query.sql.includes('profile.display_name')) {
+        return [{
+          contact: 'coordinator@school.example',
+          displayName: 'Alex Teacher',
+          memberType: 'teacher',
+          role: 'Coordinator',
+          userId: memberA,
+        }];
+      }
+      return [];
+    });
+    const repository = new DrizzleEventsRepository(database.asDatabase());
+
+    await repository.replaceManagingTeam({ schoolId, userId: teacherId }, eventId, [{
+      contact: 'coordinator@school.example',
+      memberType: 'teacher',
+      role: 'Coordinator',
+      userId: memberA,
+    }]);
+
+    await repository.replaceManagingTeam({ schoolId, userId: teacherId }, eventId, [{
+      contact: null,
+      memberType: 'teacher',
+      role: 'Coordinator',
+      userId: memberA,
+    }]);
+
+    const outboxes = outboxQueries(database, 'events.managers.replaced');
+    expect(outboxPayload(outboxes[0]!, 'events.managers.replaced').members)
+      .toEqual([expect.objectContaining({ contact: 'coordinator@school.example' })]);
+    expect(outboxPayload(outboxes[1]!, 'events.managers.replaced').members)
+      .toEqual([expect.objectContaining({ contact: null })]);
+    expect(database.queries.some((query) => query.sql.includes('requested."userId"'))).toBe(true);
+    expect(database.queries.some((query) => query.sql.includes('requested."memberType"'))).toBe(true);
+    expect(database.queries.some((query) => query.sql.includes('requested.contact'))).toBe(true);
+    expect(database.queries.some((query) => query.params.some((parameter) => (
+      String(parameter).includes('"contact":null')
+    )))).toBe(true);
   });
 });

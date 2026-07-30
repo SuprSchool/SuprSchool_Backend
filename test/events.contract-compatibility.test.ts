@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AuthenticationMiddleware } from '../src/middleware/authenticate.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import type { IdempotencyStore } from '../src/platform/idempotency/idempotency-store.js';
 import { createStudentEventsRouter } from '../src/routes/student-events.routes.js';
 import { createTeacherEventsRouter } from '../src/routes/teacher-events.routes.js';
 import type { EventsService } from '../src/services/events.service.js';
@@ -14,6 +15,7 @@ const schoolId = '22222222-2222-4222-8222-222222222222';
 const studentId = '33333333-3333-4333-8333-333333333333';
 const teacherId = '44444444-4444-4444-8444-444444444444';
 const teamId = '55555555-5555-4555-8555-555555555555';
+const unusedIdempotency = {} as IdempotencyStore;
 
 function authenticateAs(role: 'student' | 'teacher'): AuthenticationMiddleware {
   return async (requestValue: Request, _response: Response, next: NextFunction): Promise<void> => {
@@ -56,7 +58,7 @@ describe('frozen Events route compatibility', () => {
     const { service, spies } = createService();
     spies.getStudentTeam.mockResolvedValue({ id: teamId, memberCount: 2, name: 'Orbit' });
     const app = express();
-    app.use('/student', createStudentEventsRouter(service, authenticateAs('student')));
+    app.use('/student', createStudentEventsRouter(service, authenticateAs('student'), unusedIdempotency));
     app.use(errorHandler);
 
     await request(app).get('/student/events?status=registered').expect(200, { items: [], nextCursor: null });
@@ -90,7 +92,7 @@ describe('frozen Events route compatibility', () => {
     const { service, spies } = createService();
     const app = express();
     app.use(express.json());
-    app.use('/teacher', createTeacherEventsRouter(service, authenticateAs('teacher')));
+    app.use('/teacher', createTeacherEventsRouter(service, authenticateAs('teacher'), unusedIdempotency));
     app.use(errorHandler);
     const members = [{ memberType: 'student', role: 'Captain', userId: studentId }];
 

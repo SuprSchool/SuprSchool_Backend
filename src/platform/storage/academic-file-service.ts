@@ -1,6 +1,7 @@
 import type { AnnouncementsRepository } from '../../db/repositories/announcements.repository.js';
 import type { AssignmentsRepository } from '../../db/repositories/assignments.repository.js';
 import type { ExamsRepository } from '../../db/repositories/exams.repository.js';
+import type { EventsRepository } from '../../db/repositories/events.repository.js';
 import type { UploadSessionIdentity } from './storage-service.js';
 import type { UploadSessionRecord } from './storage-service.js';
 import {
@@ -19,7 +20,8 @@ export type AcademicFileParentType =
   | 'announcement-resource'
   | 'assignment-resource'
   | 'assignment-submission'
-  | 'exam-resource';
+  | 'exam-resource'
+  | 'event-resource';
 
 export interface AcademicFileCreateInput extends UploadSessionRequest {
   bucket: typeof ACADEMIC_FILE_BUCKET;
@@ -43,6 +45,7 @@ export interface ConfirmedAcademicFile {
 export interface AcademicParentRepositories {
   announcements: Pick<AnnouncementsRepository, 'canManage'>;
   assignments: Pick<AssignmentsRepository, 'canAccessSubmission' | 'canManage'>;
+  events: Pick<EventsRepository, 'canManage'>;
   exams: Pick<ExamsRepository, 'canManageAssessment'>;
 }
 
@@ -68,6 +71,8 @@ export class AcademicUploadParentAuthorizer implements UploadParentAuthorizer {
         return this.repositories.assignments.canAccessSubmission(identity, request.parentId);
       case 'exam-resource':
         return this.repositories.exams.canManageAssessment(identity, request.parentId);
+      case 'event-resource':
+        return this.repositories.events.canManage(identity, request.parentId);
       default:
         return false;
     }
@@ -187,5 +192,6 @@ function isAcademicParentType(value: string): value is AcademicFileParentType {
   return value === 'announcement-resource'
     || value === 'assignment-resource'
     || value === 'assignment-submission'
-    || value === 'exam-resource';
+    || value === 'exam-resource'
+    || value === 'event-resource';
 }

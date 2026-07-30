@@ -6,6 +6,10 @@ export type EventTeacherScope = 'all' | 'my' | 'upcoming' | 'completed';
 export type EventTeacherStatus = 'upcoming' | 'completed';
 export type EventManagerMemberType = 'teacher' | 'student';
 export type EventResultTargetType = 'registration' | 'team';
+export type EventAudienceType = 'classes' | 'school';
+export type EventGenderEligibility = 'female' | 'male' | 'mixed';
+export type EventMemberRole = 'student' | 'teacher';
+export type EventResourceKind = 'attachment' | 'banner';
 
 export interface EventsIdentity {
   schoolId: string;
@@ -44,15 +48,19 @@ export interface EventRegistrationState {
 
 export interface EventSummary {
   activityKind: EventActivityKind;
+  audienceType: EventAudienceType;
   category: string | null;
   createdAt: string;
+  isOwned: boolean;
   endsAt: string | null;
+  genderEligibility: EventGenderEligibility;
   id: string;
   lifecycle: EventLifecycle;
   participationMode: EventParticipationMode | null;
-  registrationDeadlineAt: string | null;
+  registrationDeadlineAt: string;
   startsAt: string;
   title: string;
+  targetClassIds: string[];
   venue: string | null;
 }
 
@@ -65,30 +73,97 @@ export interface EventPage<TItem extends EventSummary> {
   nextCursor: string | null;
 }
 
+export interface EventResource {
+  contentType: string;
+  id: string;
+  kind: EventResourceKind;
+  name: string;
+  sizeBytes: number;
+  sortOrder: number;
+}
+
+export interface EventResourceRead extends EventResource {
+  signedUrl: string;
+}
+
+export interface EventResourceUploadSession {
+  expiresAt: string;
+  objectPath: string;
+  signedUploadUrl: string;
+  uploadSessionId: string;
+}
+
+export interface CreateEventResourceUploadInput {
+  contentType: string;
+  displayName: string;
+  kind: EventResourceKind;
+  sizeBytes: number;
+  sortOrder: number;
+}
+
+export interface EventClassOption {
+  classId: string;
+  label: string;
+}
+export interface EventMemberCursor {
+  displayNameKey: string;
+  userId: string;
+}
+
+export interface EventMemberOptionsPage {
+  items: EventMemberOption[];
+  nextCursor: string | null;
+}
+
+
+export interface EventMemberOption {
+  displayName: string;
+  role: EventMemberRole;
+  userId: string;
+}
+
+export interface EventMemberOptionsQuery {
+  cursor?: EventMemberCursor | undefined;
+  limit: number;
+  role?: EventMemberRole | undefined;
+  search?: string | undefined;
+}
+
 export interface StudentEventDetail extends StudentEventSummary {
+  banner: EventResourceRead | null;
   description: string | null;
   eligibilityCriteria: string | null;
   eligibilityRules: EventEligibilityRules;
+  managingTeam: EventManagingMember[];
   targetClassIds: string[];
+  resources: EventResourceRead[];
+  rulesAndRegulations: string | null;
 }
 
 export interface TeacherEventDetail extends EventSummary {
+  banner: EventResourceRead | null;
   description: string | null;
   eligibilityCriteria: string | null;
   eligibilityRules: EventEligibilityRules;
   isOwned: boolean;
+  managingTeam: EventManagingMember[];
   targetClassIds: string[];
+  resources: EventResourceRead[];
+  rulesAndRegulations: string | null;
 }
 
 export interface CreateEventInput {
   activityKind: EventActivityKind;
+  audienceType?: EventAudienceType | undefined;
   category?: string | undefined;
   description?: string | undefined;
   eligibilityCriteria?: string | undefined;
   endsAt?: string | undefined;
+  genderEligibility?: EventGenderEligibility | undefined;
   lifecycle?: Extract<EventLifecycle, 'draft' | 'published'> | undefined;
   participationMode?: EventParticipationMode | undefined;
-  registrationDeadlineAt?: string | undefined;
+  registrationDeadlineAt: string;
+  rulesAndRegulations?: string | undefined;
   startsAt: string;
   targetClassIds: string[];
   title: string;
@@ -97,13 +172,16 @@ export interface CreateEventInput {
 
 export interface UpdateEventInput {
   activityKind?: EventActivityKind | undefined;
+  audienceType?: EventAudienceType | undefined;
   category?: string | null | undefined;
   description?: string | null | undefined;
   eligibilityCriteria?: string | null | undefined;
   endsAt?: string | null | undefined;
-  lifecycle?: EventLifecycle | undefined;
+  lifecycle?: Exclude<EventLifecycle, 'archived'> | undefined;
+  genderEligibility?: EventGenderEligibility | undefined;
   participationMode?: EventParticipationMode | null | undefined;
-  registrationDeadlineAt?: string | null | undefined;
+  registrationDeadlineAt?: string | undefined;
+  rulesAndRegulations?: string | null | undefined;
   startsAt?: string | undefined;
   targetClassIds?: string[] | undefined;
   title?: string | undefined;
@@ -113,10 +191,12 @@ export interface UpdateEventInput {
 export interface EventManagingMemberInput {
   memberType: EventManagerMemberType;
   role: string;
+  contact?: string | null | undefined;
   userId: string;
 }
 
 export interface EventManagingMember extends EventManagingMemberInput {
+  contact: string | null;
   displayName: string;
 }
 

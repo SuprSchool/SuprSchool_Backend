@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /* global URL, console, process */
 
 import { pathToFileURL } from 'node:url';

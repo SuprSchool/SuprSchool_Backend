@@ -8,6 +8,7 @@ export interface SupabaseAuthClient {
   refreshSession(input: { refreshToken: string }): Promise<AuthSession>;
   signOut(input: { accessToken: string }): Promise<void>;
   createConfirmedUser(input: { phone: string; password: string }): Promise<{ userId: string }>;
+  deleteUser(input: { userId: string }): Promise<void>;
   updateUserPassword(input: { userId: string; password: string }): Promise<void>;
 }
 
@@ -49,6 +50,10 @@ export function createSupabaseAuthClient(
       const { data, error } = await requireAdmin().auth.admin.createUser({ password, phone, phone_confirm: true });
       if (error || !data.user) throw new AppError('SCHOOL_DIRECTORY_ACCESS_DENIED', 403, 'Unable to complete signup');
       return { userId: data.user.id };
+    },
+    async deleteUser({ userId }): Promise<void> {
+      const { error } = await requireAdmin().auth.admin.deleteUser(userId);
+      if (error) throw new AppError('INTERNAL_ERROR', 503, 'Unable to complete signup');
     },
     async updateUserPassword({ userId, password }): Promise<void> {
       const { error } = await requireAdmin().auth.admin.updateUserById(userId, { password });

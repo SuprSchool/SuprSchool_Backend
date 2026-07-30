@@ -108,6 +108,7 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
       new AcademicUploadParentAuthorizer({
         announcements,
         assignments,
+        events,
         exams,
       }),
       new RecordingResourceUploadParentAuthorizer(recordings),
@@ -205,7 +206,8 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
       queue: platform.queue,
       repository: diary,
     }),
-    eventsService: createEventsService({ pointAwards, repository: events }),
+    eventMetadataIdempotency: idempotency,
+    eventsService: createEventsService({ files, pointAwards, repository: events }),
     recordingsIdempotency: idempotency,
     recordingsService: createRecordingService({
       files: recordingFiles,

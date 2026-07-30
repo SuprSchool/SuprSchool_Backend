@@ -3,6 +3,7 @@ import {
   type ChatTypingPublisher,
 } from '../db/repositories/chat.repository.js';
 import { AppError } from '../lib/errors.js';
+import { logger } from '../lib/logger.js';
 import type { CacheStore } from '../platform/cache/cache-store.js';
 import { tenantCacheKey } from '../platform/cache/cache-store.js';
 import {
@@ -44,6 +45,15 @@ export function createChatService({
   repository,
   typingPublisher,
 }: CreateChatServiceDependencies): ChatService {
+  let cacheFailureLogged = false;
+  const onCacheUnavailable = (error: unknown): void => {
+    if (cacheFailureLogged) return;
+    cacheFailureLogged = true;
+    logger.warn({
+      cacheErrorName: error instanceof Error ? error.name : typeof error,
+    }, 'chat rate-limit cache unavailable; allowing the request');
+  };
+
   return {
     listRooms: (identity) => repository.listRooms(identity),
 
@@ -96,6 +106,7 @@ export function createChatService({
           tenantCacheKey(identity.schoolId, 'chat', 'message', `${identity.userId}:${roomId}`),
           messageLimit,
           'Too many messages. Please try again shortly.',
+          onCacheUnavailable,
         );
       } catch (error) {
         await idempotency.release(request);
@@ -119,6 +130,7 @@ export function createChatService({
         tenantCacheKey(identity.schoolId, 'chat', 'typing', `${identity.userId}:${roomId}`),
         typingLimit,
         'Too many typing updates. Please try again shortly.',
+        onCacheUnavailable,
       );
       await typingPublisher.publishTyping(
         access,
@@ -134,14 +146,23 @@ async function enforceLimit(
   key: string,
   limit: { maximum: number; windowSeconds: number },
   message: string,
+  onUnavailable: (error: unknown) => void,
 ): Promise<void> {
-  const accepted = await cache.withLock(`${key}:lock`, limit.windowSeconds, async () => {
-    const current = Number.parseInt(await cache.get(key) ?? '0', 10);
-    const count = Number.isSafeInteger(current) && current > 0 ? current : 0;
-    if (count >= limit.maximum) return false;
-    await cache.set(key, String(count + 1), limit.windowSeconds);
-    return true;
-  });
+  let accepted: boolean | null;
+  try {
+    accepted = await cache.withLock(`${key}:lock`, limit.windowSeconds, async () => {
+      const current = Number.parseInt(await cache.get(key) ?? '0', 10);
+      const count = Number.isSafeInteger(current) && current > 0 ? current : 0;
+      if (count >= limit.maximum) return false;
+      await cache.set(key, String(count + 1), limit.windowSeconds);
+      return true;
+    });
+  } catch (error) {
+    // Redis improves distributed limiting, but an outage must not turn every
+    // otherwise durable message into a 500. Normal limiting resumes on recovery.
+    onUnavailable(error);
+    return;
+  }
   if (accepted !== true) {
     throw new AppError('RATE_LIMITED', 429, message);
   }

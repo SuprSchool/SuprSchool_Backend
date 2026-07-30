@@ -3,10 +3,13 @@ import type { ContactAdminRepository } from '../db/repositories/contact-admin.re
 import type { PasswordResetChallengeRepository } from '../db/repositories/password-reset-challenge.repository.js';
 import type { SignupChallengeRepository } from '../db/repositories/signup-challenge.repository.js';
 import { AppError } from '../lib/errors.js';
+import { logger } from '../lib/logger.js';
 import type {
   AuthenticatedResult,
   AuthSession,
   LoginInput,
+  SignupProfileInput,
+  SignupProfilePreview,
   PasswordResetCompleteInput,
   PasswordResetVerifyInput,
   SignupCompleteInput,
@@ -30,6 +33,7 @@ export interface AuthServiceDependencies {
 export interface AuthService {
   startSignup(input: SignupStartInput): Promise<void>;
   verifySignup(input: SignupVerifyInput): Promise<void>;
+  getVerifiedSignupProfile(input: SignupProfileInput): Promise<SignupProfilePreview>;
   completeSignup(input: SignupCompleteInput): Promise<AuthenticatedResult>;
   login(input: LoginInput): Promise<AuthenticatedResult>;
   getMe(userId: string): Promise<AuthenticatedResult['user']>;
@@ -93,6 +97,15 @@ export function createAuthService({
       await signupChallenges.markVerified(phoneE164);
     },
 
+    async getVerifiedSignupProfile({ mobile }): Promise<SignupProfilePreview> {
+      if (!signupChallenges) unavailable();
+      const phoneE164 = normalizeIndianPhone(mobile);
+      if (!await signupChallenges.findVerifiedByPhone(phoneE164)) invalidOtp();
+      const profile = await schoolDirectory.findSignupProfileByPhone(phoneE164);
+      if (!profile) invalidOtp();
+      return profile;
+    },
+
     async completeSignup({ mobile, password, interests }): Promise<AuthenticatedResult> {
       if (!signupChallenges) unavailable();
       assertPassword(password);
@@ -106,13 +119,23 @@ export function createAuthService({
       }
       if (!await signupChallenges.findVerifiedByPhone(phoneE164)) invalidOtp();
       const created = await supabase.createConfirmedUser({ phone: phoneE164, password });
-      const user = await schoolDirectory.linkAuthenticatedUser(
-        directoryEntry.id,
-        created.userId,
-        interests,
-      );
-      if (!user) {
-        throw new AppError('SCHOOL_DIRECTORY_ACCESS_DENIED', 403, 'This number is not listed in your school\'s directory. Please contact your school administrator.');
+      let user;
+      try {
+        user = await schoolDirectory.linkAuthenticatedUser(
+          directoryEntry.id,
+          created.userId,
+          interests,
+        );
+        if (!user) {
+          throw new AppError('SCHOOL_DIRECTORY_ACCESS_DENIED', 403, 'This number is not listed in your school\'s directory. Please contact your school administrator.');
+        }
+      } catch (error) {
+        try {
+          await supabase.deleteUser({ userId: created.userId });
+        } catch {
+          logger.error({ operation: 'delete_user_after_directory_link_failure' }, 'Unable to compensate for failed signup');
+        }
+        throw error;
       }
       await signupChallenges.markCompleted(phoneE164);
       const session = await supabase.signInWithPassword({ phone: phoneE164, password });

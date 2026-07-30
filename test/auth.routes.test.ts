@@ -12,6 +12,7 @@ type AuthServiceMock = AuthService;
 function createAuthService(): AuthServiceMock {
   return {
     getMe: vi.fn(),
+    getVerifiedSignupProfile: vi.fn(),
     login: vi.fn(),
     logout: vi.fn(),
     refresh: vi.fn(),
@@ -248,6 +249,22 @@ describe('auth request validation', () => {
     expect(response.status).toBe(400);
     expect(response.body.error.code).toBe('VALIDATION_ERROR');
   });
+
+  it('rejects malformed JSON without exposing the request body', async () => {
+    const malformedBody = '{"mobile":';
+    const response = await request(createApp({ authService: createAuthService() }))
+      .post('/v1/auth/login')
+      .set('content-type', 'application/json')
+      .send(malformedBody);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'Invalid request',
+      requestId: expect.any(String),
+    });
+    expect(JSON.stringify(response.body)).not.toContain(malformedBody);
+  });
 });
 
 describe('Phase 1 session routes', () => {
@@ -288,5 +305,63 @@ describe('Phase 1 session routes', () => {
     expect(authService.completePasswordReset).toHaveBeenCalledWith({
       mobile: '9876543210', newPassword: 'NewPassword1',
     });
+  });
+});
+
+describe('POST /v1/auth/signup/profile', () => {
+  const studentPreview = {
+    className: 'Class 10-A',
+    displayName: 'Asha Student',
+    grade: '10',
+    phoneE164: '+919876543210',
+    role: 'student' as const,
+    rollNumber: '14',
+    schoolName: 'Supr School',
+    section: 'A',
+  };
+
+  it('forwards the literal mobile-only request to the verified signup profile service', async () => {
+    const authService = createAuthService();
+    vi.mocked(authService.getVerifiedSignupProfile).mockResolvedValue(studentPreview);
+
+    const response = await request(createApp({ authService }))
+      .post('/v1/auth/signup/profile')
+      .send({ mobile: '9876543210' });
+
+    expect(response.status).toBe(200);
+    expect(authService.getVerifiedSignupProfile).toHaveBeenCalledWith({ mobile: '9876543210' });
+  });
+
+  it('rejects a client-provided role before the directory preview is requested', async () => {
+    const authService = createAuthService();
+
+    const response = await request(createApp({ authService }))
+      .post('/v1/auth/signup/profile')
+      .send({ mobile: '9876543210', role: 'teacher' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(authService.getVerifiedSignupProfile).not.toHaveBeenCalled();
+  });
+
+  it('returns the typed role-specific preview without Auth or challenge fields', async () => {
+    const authService = createAuthService();
+    const teacherPreview = {
+      classTeacher: 'Class 9-B, Class 10-A',
+      displayName: 'Meera Kapoor',
+      employeeCode: 'T-042',
+      phoneE164: '+919876543211',
+      role: 'teacher' as const,
+      schoolName: 'Supr School',
+      subjects: ['Chemistry', 'Physics'],
+    };
+    vi.mocked(authService.getVerifiedSignupProfile).mockResolvedValue(teacherPreview);
+
+    const response = await request(createApp({ authService }))
+      .post('/v1/auth/signup/profile')
+      .send({ mobile: '9876543211' });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(teacherPreview);
   });
 });

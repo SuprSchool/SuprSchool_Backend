@@ -69,6 +69,7 @@ export interface AppDependencies {
   studentHomeService?: StudentHomeService;
   teacherClassesService?: TeacherClassesService;
   notificationService?: NotificationService;
+  eventMetadataIdempotency?: IdempotencyStore;
   recordingsIdempotency?: IdempotencyStore;
   recordingsService?: RecordingService;
   diaryService?: DiaryService;
@@ -186,13 +187,20 @@ export function createApp(dependencies: AppDependencies = {}): Express {
     );
   }
   if (authenticate && dependencies.eventsService) {
+    if (!dependencies.eventMetadataIdempotency) {
+      throw new Error('Event metadata idempotency is required when the events service is configured');
+    }
     app.use(
       "/v1/student",
-      createStudentEventsRouter(dependencies.eventsService, authenticate),
+      createStudentEventsRouter(dependencies.eventsService, authenticate, dependencies.eventMetadataIdempotency),
     );
     app.use(
       "/v1/teacher",
-      createTeacherEventsRouter(dependencies.eventsService, authenticate),
+      createTeacherEventsRouter(
+        dependencies.eventsService,
+        authenticate,
+        dependencies.eventMetadataIdempotency,
+      ),
     );
   }
   if (authenticate && dependencies.announcementService) {

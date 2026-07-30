@@ -12,7 +12,7 @@ import { createStorageCleanupHandler, runtimeUploadBuckets } from '../src/config
 import type { Database } from '../src/db/client.js';
 import { AcademicCache, examGroupLeaderboardVersionKey, studentAssignmentListVersionKey } from '../src/platform/academic/academic-cache.js';
 import { createAcademicMutationExecutor } from '../src/platform/academic/academic-mutation-executor.js';
-import { IdempotencyStore, type IdempotencyRecord, type IdempotencyRecordStore } from '../src/platform/idempotency/idempotency-store.js';
+import { DatabaseIdempotencyRecordStore, IdempotencyStore, type IdempotencyRecord, type IdempotencyRecordStore } from '../src/platform/idempotency/idempotency-store.js';
 import { AcademicOutbox } from '../src/platform/academic/academic-outbox.js';
 import {
   createAcademicNotificationHandlers,
@@ -122,6 +122,7 @@ describe('academic file service', () => {
         canAccessSubmission: submissionCanAccess,
         canManage: assignmentCanManage,
       },
+      events: { canManage: vi.fn().mockResolvedValue(false) },
       exams: { canManageAssessment: examCanManage },
     });
 
@@ -424,6 +425,59 @@ describe('academic cache', () => {
 });
 
 describe('academic storage cleanup', () => {
+  it('keeps archived event media durable across Storage failure and deletes the row only after retry succeeds', async () => {
+    const resourceId = '77777777-7777-4777-8777-777777777777';
+    const objectPath = `${schoolId}/event-resource/${eventId}/${resourceId}`;
+    let rowExists = true;
+    const execute = vi.fn(async (query: unknown) => {
+      const rendered = pgDialect.sqlToQuery(query as SQL);
+      if (rendered.sql.includes('select distinct bucket, object_path, upload_session_id')) {
+        return rowExists ? [{
+          bucket: 'academic-files',
+          event_resource_id: resourceId,
+          object_path: objectPath,
+          upload_session_id: null,
+        }] : [];
+      }
+      if (rendered.sql.includes('delete from public.event_resources')) {
+        rowExists = false;
+        return [];
+      }
+      throw new Error(`Unexpected archived event cleanup query: ${rendered.sql}`);
+    });
+    const remove = vi.fn()
+      .mockRejectedValueOnce(new Error('Storage temporarily unavailable'))
+      .mockResolvedValueOnce(undefined);
+    const handler = createStorageCleanupHandler(
+      { execute } as unknown as Database,
+      { remove },
+    );
+    const message = {
+      eventId,
+      eventType: 'storage.cleanup_expired_sessions' as const,
+      occurredAt: '2026-07-13T00:00:00.000Z',
+      payload: {},
+      schoolId,
+      schemaVersion: 1 as const,
+    };
+
+    await expect(handler(message, { providerIdempotencyKey: eventId }))
+      .rejects.toThrow('Storage temporarily unavailable');
+    expect(rowExists).toBe(true);
+
+    await expect(handler(message, { providerIdempotencyKey: eventId }))
+      .resolves.toBeUndefined();
+    expect(rowExists).toBe(false);
+    expect(remove).toHaveBeenCalledTimes(2);
+
+    const candidate = execute.mock.calls
+      .map(([query]) => pgDialect.sqlToQuery(query as SQL).sql)
+      .find((sqlText) => sqlText.includes('select distinct bucket, object_path, upload_session_id'));
+    expect(candidate).toContain('from public.event_resources resource');
+    expect(candidate).toContain('event.deleted_at is not null');
+    expect(candidate).toContain('event_resource_id is not null');
+    expect(candidate).toContain('limit 500');
+  });
   it('removes expired academic objects and treats an object-not-found response as success', async () => {
     const database = {
       execute: vi.fn().mockResolvedValue([{
@@ -554,6 +608,28 @@ describe('academic service cache wiring', () => {
     expect(exams).toContain('await invalidate(assessment.groupId, identity.schoolId)');
     expect(dependencies).not.toContain('createAnnouncementsService({ cache,');
     expect(dependencies).toContain('createExamsService({ cache,');
+  });
+});
+
+describe('database idempotency lease recovery', () => {
+  it('atomically reclaims only the matching expired pending request', async () => {
+    const leaseToken = '2026-07-29 18:40:00+00';
+    const execute = vi.fn().mockResolvedValue([{ lease_expires_at: leaseToken }]);
+    const store = new DatabaseIdempotencyRecordStore({ execute } as unknown as Database);
+
+    await expect(store.reclaimExpired(
+      schoolId,
+      teacherId,
+      'scoped-key',
+      'a'.repeat(64),
+    )).resolves.toBe(leaseToken);
+
+    const rendered = pgDialect.sqlToQuery(execute.mock.calls[0]?.[0] as SQL);
+    expect(rendered.sql).toContain("set lease_expires_at = clock_timestamp() + interval '10 minutes'");
+    expect(rendered.sql).toContain('request_hash =');
+    expect(rendered.sql).toContain('response_status is null');
+    expect(rendered.sql).toContain('lease_expires_at <= clock_timestamp()');
+    expect(rendered.params).toEqual(expect.arrayContaining([schoolId, teacherId, 'scoped-key', 'a'.repeat(64)]));
   });
 });
 

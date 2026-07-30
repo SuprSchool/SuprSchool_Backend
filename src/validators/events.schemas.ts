@@ -1,6 +1,8 @@
+import type { EventMemberCursor } from '../types/events.js';
 import { z } from 'zod';
 
 import type { EventsCursor } from '../types/events.js';
+import { academicFileContentTypes } from '../platform/storage/academic-file-content-types.js';
 
 const uuidSchema = z.uuid();
 const microsecondTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
@@ -27,6 +29,34 @@ export function encodeEventsCursor(cursor: EventsCursor): string {
   }
   return Buffer.from(`${cursor.createdAt}|${cursor.id}`).toString('base64url');
 }
+
+const eventMemberCursorPayloadSchema = z.object({
+  displayNameKey: z.string().min(1).max(240),
+  userId: uuidSchema,
+}).strict();
+
+export function decodeEventMemberCursor(value: string): EventMemberCursor {
+  try {
+    const decoded = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as unknown;
+    return eventMemberCursorPayloadSchema.parse(decoded);
+  } catch {
+    throw new Error('Invalid event member cursor');
+  }
+}
+
+export function encodeEventMemberCursor(cursor: EventMemberCursor): string {
+  const parsed = eventMemberCursorPayloadSchema.parse(cursor);
+  return Buffer.from(JSON.stringify(parsed)).toString('base64url');
+}
+
+const eventMemberCursorSchema = z.string().transform((value, context) => {
+  try {
+    return decodeEventMemberCursor(value);
+  } catch {
+    context.addIssue({ code: 'custom', message: 'Use a valid event member cursor' });
+    return z.NEVER;
+  }
+});
 
 const cursorSchema = z.string().transform((value, context) => {
   try {
@@ -115,7 +145,7 @@ export function rankEventResults(
 
 const isoDateTimeSchema = z.string().datetime({ offset: true });
 const eventIdParamsSchema = z.object({ eventId: z.uuid() });
-const targetClassIdsSchema = z.array(z.uuid()).min(1).max(100).superRefine((value, context) => {
+const targetClassIdsSchema = z.array(z.uuid()).max(100).superRefine((value, context) => {
   if (new Set(value).size !== value.length) {
     context.addIssue({ code: 'custom', message: 'Target classes must be unique' });
   }
@@ -123,19 +153,28 @@ const targetClassIdsSchema = z.array(z.uuid()).min(1).max(100).superRefine((valu
 
 export const createEventSchema = z.object({
   activityKind: z.enum(['event', 'competition']),
+  audienceType: z.enum(['classes', 'school']).default('classes'),
   category: z.string().trim().min(1).max(120).optional(),
   description: z.string().trim().max(10_000).optional(),
   eligibilityCriteria: z.string().trim().min(1).max(2_000).optional(),
   eligibilityRules: z.object({ targetClassIds: targetClassIdsSchema }).strict().optional(),
   endsAt: isoDateTimeSchema.optional(),
+  genderEligibility: z.enum(['female', 'male', 'mixed']).default('mixed'),
   lifecycle: z.enum(['draft', 'published']).optional(),
   participationMode: z.enum(['solo', 'team']).optional(),
-  registrationDeadlineAt: isoDateTimeSchema.optional(),
+  registrationDeadlineAt: isoDateTimeSchema,
+  rulesAndRegulations: z.string().trim().min(1).max(10_000).optional(),
   startsAt: isoDateTimeSchema,
-  targetClassIds: targetClassIdsSchema,
+  targetClassIds: targetClassIdsSchema.default([]),
   title: z.string().trim().min(1).max(240),
   venue: z.string().trim().min(1).max(240).optional(),
 }).strict().superRefine((value, context) => {
+  if (value.audienceType === 'classes' && value.targetClassIds.length === 0) {
+    context.addIssue({ code: 'custom', message: 'Class events require at least one target class' });
+  }
+  if (value.audienceType === 'school' && value.targetClassIds.length !== 0) {
+    context.addIssue({ code: 'custom', message: 'Whole-school events cannot enumerate target classes' });
+  }
   if (value.eligibilityRules !== undefined && value.eligibilityRules.targetClassIds.join('|') !== value.targetClassIds.join('|')) {
     context.addIssue({ code: 'custom', message: 'Eligibility target classes must match the event audience' });
   }
@@ -152,19 +191,31 @@ export const createEventSchema = z.object({
 
 export const updateEventSchema = z.object({
   activityKind: z.enum(['event', 'competition']).optional(),
+  audienceType: z.enum(['classes', 'school']).optional(),
   category: z.string().trim().min(1).max(120).nullable().optional(),
   description: z.string().trim().max(10_000).nullable().optional(),
   eligibilityCriteria: z.string().trim().min(1).max(2_000).nullable().optional(),
   eligibilityRules: z.object({ targetClassIds: targetClassIdsSchema }).strict().optional(),
   endsAt: isoDateTimeSchema.nullable().optional(),
-  lifecycle: z.enum(['draft', 'published', 'archived', 'completed']).optional(),
+  lifecycle: z.enum(['draft', 'published', 'completed']).optional(),
+  genderEligibility: z.enum(['female', 'male', 'mixed']).optional(),
   participationMode: z.enum(['solo', 'team']).nullable().optional(),
-  registrationDeadlineAt: isoDateTimeSchema.nullable().optional(),
+  registrationDeadlineAt: isoDateTimeSchema.optional(),
+  rulesAndRegulations: z.string().trim().min(1).max(10_000).nullable().optional(),
   startsAt: isoDateTimeSchema.optional(),
   targetClassIds: targetClassIdsSchema.optional(),
   title: z.string().trim().min(1).max(240).optional(),
   venue: z.string().trim().min(1).max(240).nullable().optional(),
 }).strict().superRefine((value, context) => {
+  if (value.audienceType === 'classes' && (value.targetClassIds === undefined || value.targetClassIds.length === 0)) {
+    context.addIssue({ code: 'custom', message: 'Changing to a class audience requires target classes' });
+  }
+  if (value.audienceType === 'school' && value.targetClassIds !== undefined && value.targetClassIds.length !== 0) {
+    context.addIssue({ code: 'custom', message: 'Whole-school events cannot enumerate target classes' });
+  }
+  if (value.audienceType === undefined && value.targetClassIds !== undefined && value.targetClassIds.length === 0) {
+    context.addIssue({ code: 'custom', message: 'Class events require at least one target class' });
+  }
   if (value.eligibilityRules !== undefined && (value.targetClassIds === undefined || value.eligibilityRules.targetClassIds.join('|') !== value.targetClassIds.join('|'))) {
     context.addIssue({ code: 'custom', message: 'Eligibility target classes must match the event audience' });
   }
@@ -179,10 +230,40 @@ export const teacherEventsQuerySchema = z.object({
   status: teacherEventStatusSchema.optional(),
 });
 
+export const eventMemberOptionsQuerySchema = z.object({
+  cursor: eventMemberCursorSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  role: z.enum(['student', 'teacher']).optional(),
+  search: z.string().trim().min(1).max(80).optional(),
+}).strict();
+
+export const eventResourceUploadSchema = z.object({
+  contentType: z.enum(academicFileContentTypes),
+  displayName: z.string().trim().min(1).max(255),
+  kind: z.enum(['attachment', 'banner']),
+  sizeBytes: z.coerce.number().int().min(1).max(20 * 1024 * 1024),
+  sortOrder: z.coerce.number().int().min(0).max(1_000).default(0),
+}).strict().superRefine((value, context) => {
+  if (value.kind === 'banner' && !['image/jpeg', 'image/png', 'image/webp'].includes(value.contentType)) {
+    context.addIssue({ code: 'custom', message: 'Event banners must be JPEG, PNG, or WebP images' });
+  }
+});
+
+export const eventResourceSessionParamsSchema = z.object({
+  eventId: z.uuid(),
+  sessionId: z.uuid(),
+});
+
+export const eventResourceParamsSchema = z.object({
+  eventId: z.uuid(),
+  resourceId: z.uuid(),
+});
+
 export const managingTeamSchema = z.object({
   members: z.array(z.object({
     memberType: z.enum(['teacher', 'student']),
     role: z.string().trim().min(1).max(120),
+    contact: z.string().trim().min(1).max(320).nullable().optional(),
     userId: z.uuid(),
   }).strict()).max(100).superRefine((members, context) => {
     if (new Set(members.map((member) => member.userId)).size !== members.length) {

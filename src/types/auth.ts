@@ -27,6 +27,33 @@ export interface SignupVerifyInput {
   otp: string;
 }
 
+export interface SignupProfileInput {
+  mobile: string;
+}
+
+interface SignupProfileBase {
+  displayName: string;
+  phoneE164: string;
+  schoolName: string;
+}
+
+export interface StudentSignupProfilePreview extends SignupProfileBase {
+  className: string | null;
+  grade: string | null;
+  role: 'student';
+  rollNumber: string | null;
+  section: string | null;
+}
+
+export interface TeacherSignupProfilePreview extends SignupProfileBase {
+  classTeacher: string | null;
+  employeeCode: string | null;
+  role: 'teacher';
+  subjects: string[];
+}
+
+export type SignupProfilePreview = StudentSignupProfilePreview | TeacherSignupProfilePreview;
+
 export interface SignupCompleteInput {
   mobile: string;
   password: string;

@@ -9,15 +9,17 @@ import {
   passwordResetVerifySchema,
   refreshSchema,
   signupCompleteSchema,
+  signupProfileSchema,
   signupStartSchema,
   signupVerifySchema,
 } from '../validators/auth.schemas.js';
 import type { AuthService } from '../services/auth.service.js';
-import type { LoginRequest, LoginResponse, MeResponse, SignupCompleteRequest, SignupCompleteResponse, SignupStartRequest, SignupStartResponse, SignupVerifyRequest } from '../types/api.js';
+import type { LoginRequest, LoginResponse, MeResponse, SignupCompleteRequest, SignupCompleteResponse, SignupProfileRequest, SignupProfileResponse, SignupStartRequest, SignupStartResponse, SignupVerifyRequest } from '../types/api.js';
 
 export interface AuthController {
   startSignup(request: Request, response: Response): Promise<void>;
   verifySignup(request: Request, response: Response): Promise<void>;
+  getVerifiedSignupProfile(request: Request, response: Response): Promise<void>;
   completeSignup(request: Request, response: Response): Promise<void>;
   login(request: Request, response: Response): Promise<void>;
   getMe(request: Request, response: Response): Promise<void>;
@@ -41,6 +43,11 @@ export function createAuthController(authService: AuthService): AuthController {
       const input: SignupVerifyRequest = signupVerifySchema.parse(request.body);
       await authService.verifySignup(input);
       response.status(200).json({ status: 'otp_verified' });
+    },
+    getVerifiedSignupProfile: async (request, response) => {
+      const input: SignupProfileRequest = signupProfileSchema.parse(request.body);
+      const body: SignupProfileResponse = await authService.getVerifiedSignupProfile(input);
+      response.status(200).json(body);
     },
     completeSignup: async (request, response) => {
       const input: SignupCompleteRequest = signupCompleteSchema.parse(request.body);

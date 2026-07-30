@@ -1,4 +1,5 @@
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 
 import type { Database } from '../client.js';
 import {
@@ -8,10 +9,12 @@ import {
   profileInterests,
   schoolDirectoryEntries,
   schoolDirectoryTeacherAssignments,
+  schools,
+  subjects,
   userProfiles,
   userRoles,
 } from '../schema/core.js';
-import type { AppIdentity, ClaimableRole, OnboardingRoute } from '../../types/auth.js';
+import type { AppIdentity, ClaimableRole, OnboardingRoute, SignupProfilePreview } from '../../types/auth.js';
 import type { ProfileInterest } from '../../types/profile.js';
 
 export interface SchoolDirectoryEntry {
@@ -25,6 +28,7 @@ export interface SchoolDirectoryEntry {
 
 export interface SchoolDirectoryRepository {
   findByPhone(phoneE164: string): Promise<SchoolDirectoryEntry | null>;
+  findSignupProfileByPhone(phoneE164: string): Promise<SignupProfilePreview | null>;
   findIdentityByPhone(phoneE164: string): Promise<AppIdentity | null>;
   linkAuthenticatedUser(
     entryId: string,
@@ -70,6 +74,59 @@ function toAppIdentity(input: {
   return { ...input, nextOnboardingRoute: onboardingRoute(input.role) };
 }
 
+export interface SignupProfileRow {
+  displayName: string;
+  employeeCode: string | null;
+  phoneE164: string;
+  role: string;
+  rollNumber: string | null;
+  schoolName: string;
+  studentClassName: string | null;
+  studentGrade: string | null;
+  studentSection: string | null;
+  subjectName: string | null;
+  teacherClassName: string | null;
+}
+
+export function mapSignupProfileRows(rows: readonly SignupProfileRow[]): SignupProfilePreview | null {
+  const row = rows[0];
+  if (!row) return null;
+  const role = asClaimableRole(row.role);
+  if (!role) return null;
+
+  const base = {
+    displayName: row.displayName,
+    phoneE164: row.phoneE164,
+    schoolName: row.schoolName,
+  };
+
+  if (role === 'student') {
+    return {
+      ...base,
+      className: row.studentClassName,
+      grade: row.studentGrade,
+      role,
+      rollNumber: row.rollNumber,
+      section: row.studentSection,
+    };
+  }
+
+  const classNames = Array.from(new Set(
+    rows.flatMap(({ teacherClassName }) => teacherClassName ? [teacherClassName] : []),
+  ));
+  const subjectNames = Array.from(new Set(
+    rows.flatMap(({ subjectName }) => subjectName ? [subjectName] : []),
+  ));
+
+  return {
+    ...base,
+    classTeacher: classNames.length ? classNames.join(', ') : null,
+    employeeCode: row.employeeCode,
+    role,
+    subjects: subjectNames,
+  };
+}
+
 export class DrizzleSchoolDirectoryRepository implements SchoolDirectoryRepository {
   public constructor(private readonly db: Database) {}
 
@@ -86,6 +143,45 @@ export class DrizzleSchoolDirectoryRepository implements SchoolDirectoryReposito
       .limit(1);
 
     return row ? toSchoolDirectoryEntry(row) : null;
+  }
+
+  public async findSignupProfileByPhone(phoneE164: string): Promise<SignupProfilePreview | null> {
+    const teacherClasses = alias(classes, 'signup_preview_teacher_classes');
+    const rows = await this.db
+      .select({
+        displayName: schoolDirectoryEntries.displayName,
+        employeeCode: schoolDirectoryEntries.employeeCode,
+        phoneE164: schoolDirectoryEntries.phoneE164,
+        role: schoolDirectoryEntries.role,
+        rollNumber: schoolDirectoryEntries.rollNumber,
+        schoolName: schools.name,
+        studentClassName: classes.displayName,
+        studentGrade: classes.grade,
+        studentSection: classes.section,
+        subjectName: subjects.name,
+        teacherClassName: teacherClasses.displayName,
+      })
+      .from(schoolDirectoryEntries)
+      .innerJoin(schools, eq(schools.id, schoolDirectoryEntries.schoolId))
+      .leftJoin(classes, eq(classes.id, schoolDirectoryEntries.studentClassId))
+      .leftJoin(
+        schoolDirectoryTeacherAssignments,
+        eq(
+          schoolDirectoryTeacherAssignments.schoolDirectoryEntryId,
+          schoolDirectoryEntries.id,
+        ),
+      )
+      .leftJoin(teacherClasses, eq(teacherClasses.id, schoolDirectoryTeacherAssignments.classId))
+      .leftJoin(subjects, eq(subjects.id, schoolDirectoryTeacherAssignments.subjectId))
+      .where(
+        and(
+          eq(schoolDirectoryEntries.phoneE164, phoneE164),
+          eq(schoolDirectoryEntries.status, 'unclaimed'),
+        ),
+      )
+      .orderBy(asc(teacherClasses.displayName), asc(subjects.name));
+
+    return mapSignupProfileRows(rows);
   }
 
   public async linkAuthenticatedUser(

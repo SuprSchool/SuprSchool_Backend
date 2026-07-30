@@ -24,7 +24,7 @@ export interface OtpVerifier {
 export function createDevelopmentOtpVerifier(
   options: { code?: string } = {},
 ): OtpVerifier {
-  const code = options.code ?? '000000';
+  const code = options.code ?? '0000';
   const challenges = new Set<string>();
   const key = ({ phone, purpose }: OtpChallengeInput) => `${purpose}:${phone}`;
 

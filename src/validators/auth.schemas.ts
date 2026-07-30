@@ -11,6 +11,10 @@ export const signupVerifySchema = z.object({
   otp: z.string().regex(/^\d{4}$/),
 }).strict();
 
+export const signupProfileSchema = z.object({
+  mobile: z.string().trim().min(1),
+}).strict();
+
 export const signupCompleteSchema = z.object({
   mobile: z.string().trim().min(1),
   password: z.string().min(8),

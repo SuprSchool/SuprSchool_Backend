@@ -22,15 +22,18 @@ export const events = pgTable(
     schoolId: uuid('school_id').notNull().references(() => schools.id),
     createdByTeacherId: uuid('created_by_teacher_id').notNull().references(() => userProfiles.id),
     activityKind: text('activity_kind').notNull(),
+    audienceType: text('audience_type').notNull().default('classes'),
     category: text('category'),
     participationMode: text('participation_mode'),
     title: text('title').notNull(),
     description: text('description'),
     venue: text('venue'),
+    genderEligibility: text('gender_eligibility').notNull().default('mixed'),
+    rulesAndRegulations: text('rules_and_regulations'),
     eligibilityCriteria: text('eligibility_criteria'),
     startsAt: timestamp('starts_at', { withTimezone: true }).notNull(),
     endsAt: timestamp('ends_at', { withTimezone: true }),
-    registrationDeadlineAt: timestamp('registration_deadline_at', { withTimezone: true }),
+    registrationDeadlineAt: timestamp('registration_deadline_at', { withTimezone: true }).notNull(),
     lifecycle: text('lifecycle').notNull().default('draft'),
     resultsPublishedAt: timestamp('results_published_at', { withTimezone: true }),
     resultsRevision: integer('results_revision').notNull().default(0),
@@ -48,9 +51,41 @@ export const events = pgTable(
       table.id,
     ),
     index('events_school_created_id_idx').on(table.schoolId, table.createdAt, table.id),
+    check('events_audience_type_check', sql`${table.audienceType} in ('classes', 'school')`),
+    check('events_gender_eligibility_check', sql`${table.genderEligibility} in ('female', 'male', 'mixed')`),
+    check('events_rules_and_regulations_length_check', sql`${table.rulesAndRegulations} is null or char_length(${table.rulesAndRegulations}) <= 10000`),
   ],
 );
 
+export const eventResources = pgTable(
+  'event_resources',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    schoolId: uuid('school_id').notNull().references(() => schools.id, { onDelete: 'cascade' }),
+    eventId: uuid('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
+    uploadSessionId: uuid('upload_session_id').notNull(),
+    objectPath: text('object_path').notNull(),
+    contentType: text('content_type').notNull(),
+    displayName: text('display_name').notNull(),
+    resourceKind: text('resource_kind').notNull(),
+    sortOrder: integer('sort_order').notNull().default(0),
+    sizeBytes: integer('size_bytes').notNull(),
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check('event_resources_kind_check', sql`${table.resourceKind} in ('attachment', 'banner')`),
+    check('event_resources_sort_order_check', sql`${table.sortOrder} between 0 and 1000`),
+    check('event_resources_size_check', sql`${table.sizeBytes} between 1 and ${20 * 1024 * 1024}`),
+    uniqueIndex('event_resources_upload_session_unique').on(table.uploadSessionId),
+    uniqueIndex('event_resources_object_path_unique').on(table.objectPath),
+    uniqueIndex('event_resources_one_current_banner_unique')
+      .on(table.eventId)
+      .where(sql`${table.resourceKind} = 'banner' and ${table.confirmedAt} is not null`),
+    index('event_resources_school_event_confirmed_order_idx')
+      .on(table.schoolId, table.eventId, table.confirmedAt, table.sortOrder, table.id),
+  ],
+);
 export const eventAudiences = pgTable(
   'event_audiences',
   {
@@ -75,11 +110,13 @@ export const eventManagers = pgTable(
     userId: uuid('user_id').notNull().references(() => userProfiles.id, { onDelete: 'cascade' }),
     memberType: text('member_type').notNull(),
     managerRole: text('manager_role').notNull(),
+    contact: text('contact'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     check('event_managers_member_type_check', sql`${table.memberType} in ('teacher', 'student')`),
     check('event_managers_manager_role_check', sql`char_length(btrim(${table.managerRole})) between 1 and 120`),
+    check('event_managers_contact_length_check', sql`${table.contact} is null or char_length(btrim(${table.contact})) between 1 and 320`),
     uniqueIndex('event_managers_event_user_unique').on(table.eventId, table.userId),
     index('event_managers_school_user_event_idx').on(table.schoolId, table.userId, table.eventId),
   ],
@@ -184,6 +221,7 @@ export const eventsSchema = {
   eventManagers,
   eventRegistrations,
   eventResultEntries,
+  eventResources,
   eventTeamMembers,
   eventTeams,
   events,

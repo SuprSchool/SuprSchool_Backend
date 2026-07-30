@@ -14,6 +14,7 @@ export function createAuthRouter(
 
   router.post('/signup/start', createSignupStartLimiter(), controller.startSignup);
   router.post('/signup/verify', controller.verifySignup);
+  router.post('/signup/profile', controller.getVerifiedSignupProfile);
   router.post('/signup/complete', controller.completeSignup);
   router.post('/login', controller.login);
   router.post('/refresh', controller.refresh);

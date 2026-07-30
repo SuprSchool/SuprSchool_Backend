@@ -6,14 +6,16 @@ import {
 } from '../controllers/events.controller.js';
 import type { AuthenticationMiddleware } from '../middleware/authenticate.js';
 import type { EventsService } from '../services/events.service.js';
+import type { IdempotencyStore } from '../platform/idempotency/idempotency-store.js';
 
 export function createStudentEventsRouter(
   service: EventsService,
   authenticate: AuthenticationMiddleware,
+  idempotency: IdempotencyStore,
 ): Router {
   const router = Router();
   const controller = createEventsController(service);
-  const actions = createStudentEventsActionsController(service);
+  const actions = createStudentEventsActionsController(service, idempotency);
 
   router.use(authenticate);
   router.get('/events', controller.listStudentEvents);

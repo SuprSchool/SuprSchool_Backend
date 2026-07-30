@@ -136,7 +136,7 @@ function createRepository() {
   return { messages, readCursors, repository, typingEvents };
 }
 
-function createTestApp() {
+function createTestApp(cache: CacheStore = createCache()) {
   const fixture = createRepository();
   const app = express();
   const authenticate: AuthenticationMiddleware = async (incoming: Request, _response: Response, next: NextFunction) => {
@@ -145,7 +145,7 @@ function createTestApp() {
   };
   app.use(express.json());
   app.use('/v1/chat', createChatRouter(createChatService({
-    cache: createCache(), idempotency: createIdempotency(), repository: fixture.repository, typingPublisher: fixture.repository,
+    cache, idempotency: createIdempotency(), repository: fixture.repository, typingPublisher: fixture.repository,
   }), authenticate));
   app.use(errorHandler);
   return { app, ...fixture };
@@ -171,6 +171,24 @@ describe('chat REST API', () => {
     const replay = await request(app).post(`/v1/chat/rooms/${roomId}/messages`).set('Idempotency-Key', key).send(body).expect(201);
     expect(replay.body).toEqual(first.body);
     expect(first.body.body).toBe('Can you explain question 4?');
+    expect(messages).toHaveLength(1);
+  });
+
+  it('persists a message when the optional rate-limit cache is temporarily unavailable', async () => {
+    const unavailableCache: CacheStore = {
+      delete: async () => undefined,
+      get: async () => { throw new Error('cache unavailable'); },
+      set: async () => { throw new Error('cache unavailable'); },
+      withLock: async () => { throw new Error('cache unavailable'); },
+    };
+    const { app, messages } = createTestApp(unavailableCache);
+
+    await request(app)
+      .post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000125')
+      .send(input('00000000-0000-4000-8000-000000000126'))
+      .expect(201);
+
     expect(messages).toHaveLength(1);
   });
 

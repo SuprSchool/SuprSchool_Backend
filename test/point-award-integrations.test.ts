@@ -173,7 +173,18 @@ describe('production point awards', () => {
         teamName: null,
       })),
     } as unknown as EventsRepository;
-    const service = createEventsService({ repository, pointAwards: { awardIfAbsent } } as never);
+    const files = {
+      createReadUrl: vi.fn(),
+      createUpload: vi.fn(),
+      deleteObject: vi.fn(),
+      finalizeUpload: vi.fn(),
+      prepareUpload: vi.fn(),
+    };
+    const service = createEventsService({
+      files,
+      repository,
+      pointAwards: { awardIfAbsent },
+    });
 
     await service.registerStudent({ schoolId, userId: studentId }, eventId);
 

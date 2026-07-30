@@ -15,11 +15,12 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:rls": "node scripts/verify-rls.mjs"
+    "verify:rls": "node scripts/verify-rls.mjs",
+    "provision:qa-auth": "node --env-file=.env --import tsx scripts/provision-qa-auth-users.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",
-    "drizzle-orm": "^0.44.7",
+    "drizzle-orm": "0.45.2",
     "express": "^5.1.0",
     "express-rate-limit": "^8.0.1",
     "helmet": "^8.2.0",

@@ -13,7 +13,31 @@ const schoolId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const studentId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const eventId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 
+function eventFiles() {
+  return {
+    createReadUrl: vi.fn(),
+    createUpload: vi.fn(),
+    deleteObject: vi.fn(),
+    finalizeUpload: vi.fn(),
+    prepareUpload: vi.fn(),
+  };
+}
 describe('events service', () => {
+  it('fails fast when repository or private file storage dependencies are absent', () => {
+    const repository = {} as EventsRepository;
+    const files = {
+      createReadUrl: vi.fn(),
+      createUpload: vi.fn(),
+      deleteObject: vi.fn(),
+      finalizeUpload: vi.fn(),
+      prepareUpload: vi.fn(),
+    };
+
+    expect(() => createEventsService({ repository } as never))
+      .toThrow('Events service requires file storage');
+    expect(() => createEventsService({ files } as never))
+      .toThrow('Events service requires a repository');
+  });
   it('returns one replay-safe registration when the repository serializes concurrent requests', async () => {
     const registration = {
       created: false,
@@ -25,7 +49,7 @@ describe('events service', () => {
     const repository = {
       registerStudent: vi.fn().mockResolvedValue(registration),
     } as unknown as EventsRepository;
-    const service = createEventsService({ repository });
+    const service = createEventsService({ files: eventFiles(), repository });
 
     const [first, replay] = await Promise.all([
       service.registerStudent({ schoolId, userId: studentId }, eventId),
@@ -44,7 +68,7 @@ describe('events service', () => {
         new AppError('FORBIDDEN', 403, 'Registration is not available'),
       ),
     } as unknown as EventsRepository;
-    const service = createEventsService({ repository });
+    const service = createEventsService({ files: eventFiles(), repository });
 
     await expect(service.registerStudent({ schoolId, userId: studentId }, eventId))
       .rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
@@ -55,9 +79,9 @@ describe('events service', () => {
     const repository = {
       createTeam: vi.fn(),
     } as unknown as EventsRepository;
-    const service = createEventsService({ repository });
+    const service = createEventsService({ files: eventFiles(), repository });
 
-    await expect(service.createTeam({ schoolId, userId: studentId }, eventId, {
+    await expect(service.createTeam({ schoolId, userId: studentId }, eventId, eventId, {
       memberStudentIds: [studentId, studentId],
       name: 'Blue Team',
     })).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
@@ -69,9 +93,9 @@ describe('events service', () => {
     const repository = {
       createTeam: vi.fn(),
     } as unknown as EventsRepository;
-    const service = createEventsService({ repository });
+    const service = createEventsService({ files: eventFiles(), repository });
 
-    await expect(service.createTeam({ schoolId, userId: studentId }, eventId, {
+    await expect(service.createTeam({ schoolId, userId: studentId }, eventId, eventId, {
       memberStudentIds: [otherStudentId],
       name: 'Blue Team',
     })).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
@@ -82,7 +106,7 @@ describe('events service', () => {
     const repository = {
       getStudentResults: vi.fn().mockResolvedValue({ entries: [], publishedAt: null, revision: 3 }),
     } as unknown as EventsRepository;
-    const service = createEventsService({ repository });
+    const service = createEventsService({ files: eventFiles(), repository });
 
     await expect(service.getStudentResults({ schoolId, userId: studentId }, eventId))
       .resolves.toEqual({ entries: [], publishedAt: null, revision: 3 });
