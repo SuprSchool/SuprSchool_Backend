@@ -68,6 +68,7 @@ export interface StudentAssignmentItem {
   isGradedAssignment: boolean;
   marks?: number | undefined;
   subjectId: string;
+  subjectName: string;
   submittedAt?: string | undefined;
   title: string;
 }

@@ -12,7 +12,7 @@ import {
 } from 'drizzle-orm';
 
 import type { Database } from '../client.js';
-import { classMembers, classSubjects } from '../schema/core.js';
+import { classMembers, classSubjects, subjects } from '../schema/core.js';
 import {
   assignmentResources,
   assignmentRubrics,
@@ -270,10 +270,15 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         marks: assignmentSubmissions.marks,
         schoolId: assignments.schoolId,
         subjectId: assignments.subjectId,
+        subjectName: subjects.name,
         submittedAt: assignmentSubmissions.submittedAt,
         title: assignments.title,
       })
       .from(assignments)
+      .innerJoin(subjects, and(
+        eq(subjects.id, assignments.subjectId),
+        eq(subjects.schoolId, assignments.schoolId),
+      ))
       .leftJoin(assignmentSubmissions, and(
         eq(assignmentSubmissions.assignmentId, assignments.id),
         eq(assignmentSubmissions.schoolId, identity.schoolId),
@@ -313,6 +318,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       isGradedAssignment: row.isGraded,
       ...(row.marks === null ? {} : { marks: row.marks }),
       subjectId: row.subjectId,
+      subjectName: row.subjectName,
       ...(row.submittedAt === null ? {} : { submittedAt: row.submittedAt.toISOString() }),
       title: row.title,
     }));

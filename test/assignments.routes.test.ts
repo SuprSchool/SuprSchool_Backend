@@ -214,6 +214,35 @@ function databaseWithTransaction(callback: RemoteCallback): Database {
 }
 
 describe('assignment review regressions', () => {
+  it('returns the authoritative subject name with each student assignment list item', async () => {
+    const callback: RemoteCallback = async () => ({
+      rows: [[
+        new Date('2026-07-20T12:00:00.000Z'),
+        null,
+        'Numeric',
+        assignmentRouteId,
+        true,
+        null,
+        schoolId,
+        validAssignment.subjectId,
+        'Mathematics',
+        null,
+        validAssignment.title,
+      ]],
+    });
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const page = await repository.listForStudent(
+      { schoolId, userId: studentId },
+      { limit: 20 },
+      new Date('2026-07-01T00:00:00.000Z'),
+    );
+
+    expect(page.items[0]).toMatchObject({ subjectName: 'Mathematics' });
+  });
+
   it('authorizes a persisted submission only for its active student owner', async () => {
     const queries: string[] = [];
     const callback: RemoteCallback = async (query) => {
