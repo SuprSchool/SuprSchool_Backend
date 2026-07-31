@@ -37,7 +37,7 @@ describe('private recording Storage adapter', () => {
     const storage = { from: vi.fn().mockReturnValue(bucket) };
     const inspector = {
       inspect: vi.fn().mockResolvedValue({
-        bitrateBps: 128_000,
+        bitrateBps: 96_000,
         channels: 1,
         codec: 'aac-lc',
         contentType: 'audio/mp4',

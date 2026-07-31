@@ -243,4 +243,17 @@ describe('event audience migration', () => {
     expect(migration).toContain('from public.class_recordings');
     expect(migration).toContain("jsonb_build_object('kind', 'recordings'");
   });
+
+  it('upgrades the shared trigger so events rows never read an event_audiences-only field', async () => {
+    const migration = await readFile(
+      new URL('../supabase/migrations/20260731020000_event_audience_trigger_record_safe.sql', import.meta.url),
+      'utf8',
+    );
+
+    expect(migration).toContain("tg_table_name = 'events'");
+    expect(migration).toContain('new_row jsonb := to_jsonb(new)');
+    expect(migration).toContain('old_row jsonb := to_jsonb(old)');
+    expect(migration).toContain("(new_row ->> 'event_id')::uuid");
+    expect(migration).toContain("(old_row ->> 'event_id')::uuid");
+  });
 });

@@ -87,7 +87,7 @@ const unavailableRecordingResourceFiles: RecordingResourceFilePort = {
   async prepareUpload() { throw new Error('Recording resource Storage is not configured'); },
 };
 
-const RECORDING_AUDIO_TARGET_BITRATE_BPS = 128_000;
+const RECORDING_AUDIO_TARGET_BITRATE_BPS = 96_000;
 const RECORDING_AUDIO_BITRATE_TOLERANCE_BPS = 6_400;
 
 function assertAudioInput(input: CreateRecordingUploadSessionInput): void {
@@ -130,7 +130,7 @@ function toConfirmInput(
 ): ConfirmRecordingUploadInput {
   return {
     // AAC encoders report the measured stream average, which legitimately
-    // varies around the selected 128 kbps profile. Persist the profile value
+    // varies around the selected 96 kbps profile. Persist the profile value
     // after the measured bitrate has passed the bounded acceptance check.
     bitrateBps: RECORDING_AUDIO_TARGET_BITRATE_BPS,
     channels: metadata.channels,

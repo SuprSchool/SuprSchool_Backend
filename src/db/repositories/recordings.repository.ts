@@ -64,7 +64,7 @@ export interface ActivateRecordingUploadSessionInput {
 }
 
 export interface ConfirmRecordingUploadInput {
-  bitrateBps: 128000;
+  bitrateBps: 96000;
   channels: 1;
   codec: 'aac-lc';
   contentType: 'audio/mp4';

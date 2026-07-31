@@ -760,7 +760,7 @@ describe('recording upload lifecycle', () => {
       status: 'pending',
     });
     vi.mocked(storagePort.confirmTusAudioUpload).mockResolvedValue({
-      bitrateBps: 128_000,
+      bitrateBps: 96_000,
       channels: 1,
       codec: 'aac-lc',
       contentType: 'audio/mp4',
@@ -799,7 +799,7 @@ describe('recording upload lifecycle', () => {
       status: 'pending',
     });
     vi.mocked(storagePort.confirmTusAudioUpload).mockResolvedValue({
-      bitrateBps: 128_000,
+      bitrateBps: 96_000,
       channels: 1,
       codec: 'aac-lc',
       contentType: 'audio/mp4',
@@ -820,7 +820,7 @@ describe('recording upload lifecycle', () => {
     expect(repositoryPort.confirmUpload).toHaveBeenCalledWith(
       { schoolId, userId },
       {
-        bitrateBps: 128_000,
+        bitrateBps: 96_000,
         channels: 1,
         codec: 'aac-lc',
         contentType: 'audio/mp4',
@@ -834,7 +834,7 @@ describe('recording upload lifecycle', () => {
   });
 
   it.each([
-    { bitrateBps: 128_000, channels: 2, label: 'stereo' },
+    { bitrateBps: 96_000, channels: 2, label: 'stereo' },
     { bitrateBps: 256_000, channels: 1, label: '256 kbps' },
   ])('rejects $label inspector metadata and schedules cleanup', async ({ bitrateBps, channels }) => {
     const repositoryPort = repository();
@@ -868,7 +868,7 @@ describe('recording upload lifecycle', () => {
     expect(repositoryPort.rejectUploadSession).toHaveBeenCalledWith({ schoolId, userId }, recordingId, playbackSessionId);
   });
 
-  it('persists trusted mono 128 kbps AAC-LC inspector metadata', async () => {
+  it('persists trusted mono 96 kbps AAC-LC inspector metadata', async () => {
     const repositoryPort = repository();
     const storagePort = storage();
     const expectedObjectPath = `${schoolId}/recording-audio/${recordingId}/${playbackSessionId}`;
@@ -882,7 +882,7 @@ describe('recording upload lifecycle', () => {
       status: 'pending',
     });
     vi.mocked(storagePort.confirmTusAudioUpload).mockResolvedValue({
-      bitrateBps: 128_000,
+      bitrateBps: 96_000,
       channels: 1,
       codec: 'aac-lc',
       contentType: 'audio/mp4',
@@ -899,7 +899,7 @@ describe('recording upload lifecycle', () => {
     expect(repositoryPort.confirmUpload).toHaveBeenCalledWith(
       { schoolId, userId },
       expect.objectContaining({
-        bitrateBps: 128_000,
+        bitrateBps: 96_000,
         channels: 1,
         codec: 'aac-lc',
         contentType: 'audio/mp4',
@@ -910,7 +910,7 @@ describe('recording upload lifecycle', () => {
     );
   });
 
-  it('accepts nominal 128 kbps AAC-LC encoder variance and stores the profile bitrate', async () => {
+  it('accepts nominal 96 kbps AAC-LC encoder variance and stores the profile bitrate', async () => {
     const repositoryPort = repository();
     const storagePort = storage();
     const expectedObjectPath = `${schoolId}/recording-audio/${recordingId}/${playbackSessionId}`;
@@ -924,7 +924,7 @@ describe('recording upload lifecycle', () => {
       status: 'pending',
     });
     vi.mocked(storagePort.confirmTusAudioUpload).mockResolvedValue({
-      bitrateBps: 127_325,
+      bitrateBps: 95_325,
       channels: 1,
       codec: 'aac-lc',
       contentType: 'audio/mp4',
@@ -941,7 +941,7 @@ describe('recording upload lifecycle', () => {
 
     expect(repositoryPort.confirmUpload).toHaveBeenCalledWith(
       { schoolId, userId },
-      expect.objectContaining({ bitrateBps: 128_000 }),
+      expect.objectContaining({ bitrateBps: 96_000 }),
     );
     expect(repositoryPort.rejectUploadSession).not.toHaveBeenCalled();
   });
