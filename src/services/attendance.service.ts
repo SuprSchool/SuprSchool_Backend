@@ -65,7 +65,8 @@ export function createAttendanceService({ pointAwards, repository }: AttendanceS
       return repository.getStudentSummary(studentId, schoolId);
     },
     async getClassRoster(teacherId: string, classId: string, attendanceDate: string): Promise<AttendanceStudent[]> {
-      return repository.getClassRoster(teacherId, classId, attendanceDate);
+      const roster = await repository.getClassRoster(teacherId, classId, attendanceDate);
+      return roster.filter((student) => student.id !== teacherId);
     },
     async getClassHistory(teacherId: string, classId: string): Promise<ClassAttendanceHistoryEntry[]> {
       return repository.getClassHistory(teacherId, classId);

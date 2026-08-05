@@ -5,7 +5,7 @@ import type {
   PersistedBulkAttendanceResult,
   StudentAttendanceSummary,
 } from '../../types/attendance.js';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 
 import type { Database } from '../client.js';
 import { classes, classMembers, classSubjects, userProfiles, userRoles } from '../schema/core.js';
@@ -250,6 +250,7 @@ export class DrizzleAttendanceRepository implements AttendanceRepository {
         eq(classMembers.classId, assignment.classId),
         eq(classMembers.schoolId, assignment.schoolId),
         eq(classMembers.isActive, true),
+        ne(classMembers.studentId, teacherId),
       ))
       .orderBy(asc(classMembers.rollNumber), asc(userProfiles.displayName));
 
@@ -258,6 +259,7 @@ export class DrizzleAttendanceRepository implements AttendanceRepository {
       isPresent: row.status === 'present' || row.status === 'late',
       name: row.name,
       rollNumber: Number(row.rollNumber ?? 0),
+      status: row.status ?? null,
     }));
   }
 

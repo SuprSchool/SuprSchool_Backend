@@ -46,6 +46,7 @@ export interface AttendanceStudent {
   isPresent: boolean;
   name: string;
   rollNumber: number;
+  status: AttendanceStatus | null;
 }
 
 export interface ClassAttendanceHistoryEntry {

@@ -132,7 +132,7 @@ describe('attendance router', () => {
   it('returns a class roster for an assigned teacher without a subject parameter', async () => {
     const attendanceService = createAttendanceService();
     vi.mocked(attendanceService.getClassRoster).mockResolvedValue([
-      { id: studentId, isPresent: true, name: 'Student One', rollNumber: 1 },
+      { id: studentId, isPresent: true, name: 'Student One', rollNumber: 1, status: 'present' },
     ]);
     const app = express();
     app.use('/attendance', createAttendanceRouter(
@@ -146,7 +146,7 @@ describe('attendance router', () => {
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({
-      students: [{ id: studentId, isPresent: true, name: 'Student One', rollNumber: 1 }],
+      students: [{ id: studentId, isPresent: true, name: 'Student One', rollNumber: 1, status: 'present' }],
     });
     expect(attendanceService.getClassRoster).toHaveBeenCalledWith(
       'teacher-1',
