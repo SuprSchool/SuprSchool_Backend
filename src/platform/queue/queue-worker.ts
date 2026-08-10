@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 
 import type { Database } from '../../db/client.js';
+import { logger, safeErrorCause, safeErrorMessage } from '../../lib/logger.js';
 import type { QueueClient, QueuedMessage } from './queue-client.js';
 import type { QueueMessage } from './queue-message.js';
 import { QUEUE_RETRY_POLICIES, type QueueName } from './queue-policy.js';
@@ -191,7 +192,22 @@ export class QueueWorker {
 
     try {
       await handler(message, Object.freeze({ providerIdempotencyKey: message.eventId }));
-    } catch {
+    } catch (error) {
+      // A bare `catch {}` here made every handler defect invisible: the queue
+      // grew, nothing was archived, and the worker's output stayed clean. The
+      // retry path below is unchanged — only the diagnosis is new.
+      const errorCause = safeErrorCause(error);
+      logger.error({
+        ...(errorCause === undefined ? {} : { errorCause }),
+        errorMessage: safeErrorMessage(error),
+        errorName: error instanceof Error ? error.name : typeof error,
+        eventId: message.eventId,
+        eventType: message.eventType,
+        messageId,
+        queueName,
+        readCount: queuedMessage.readCount,
+        schoolId: message.schoolId,
+      }, 'queue handler failed');
       await this.processedEvents.markFailed(message.eventId, claim.attemptToken);
       return;
     }
