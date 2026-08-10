@@ -8,7 +8,10 @@ import { AppError } from '../src/lib/errors.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { createDiaryService as createDiaryApplicationService } from '../src/services/diary.service.js';
 import type { DiaryService } from '../src/services/diary.service.js';
+import { DrizzleDiaryRepository } from '../src/db/repositories/diary.repository.js';
 import type { DiaryRepository } from '../src/db/repositories/diary.repository.js';
+import type { Database } from '../src/db/client.js';
+import type { DiaryOutboxWriter } from '../src/async/diary/diary-outbox.js';
 import type { DiaryEntryView, DiaryRecord } from '../src/types/diary.js';
 import type { IdempotencyStore } from '../src/platform/idempotency/idempotency-store.js';
 import type { QueueClient } from '../src/platform/queue/queue-client.js';
@@ -409,6 +412,76 @@ describe('diary router', () => {
       occurredOn: '2026-08-08',
       periodLabel: '2nd Period',
     });
+  });
+});
+
+describe('diary repository', () => {
+  /**
+   * Drives the real `create` through a recording transaction. The unique
+   * constraint on (class subject, date, period) is not partial, so re-adding a
+   * deleted entry takes the conflict branch — what that branch writes is the
+   * whole behaviour under test.
+   */
+  function createRecordingDatabase(capture: (conflict: { set: Record<string, unknown> }) => void) {
+    const committedRow = {
+      classId,
+      classSubjectId,
+      description: 'Added unlike fractions',
+      id: diaryId,
+      keyPoints: ['LCD'],
+      occurredOn: '2026-07-13',
+      periodLabel: '1st Period',
+      revision: 2,
+      schoolId: 'school-1',
+      teacherId: 'teacher-1',
+      title: 'Fractions',
+      updatedAt: new Date('2026-07-13T10:00:00.000Z'),
+    };
+    const transaction = {
+      execute: () => Promise.resolve([{ id: 'idempotency-1' }]),
+      insert: () => ({
+        values: () => ({
+          onConflictDoUpdate: (conflict: { set: Record<string, unknown> }) => {
+            capture(conflict);
+            return { returning: () => Promise.resolve([committedRow]) };
+          },
+        }),
+      }),
+      select: () => ({
+        from: () => ({
+          innerJoin: () => ({
+            where: () => ({ limit: () => Promise.resolve([{ schoolId: 'school-1' }]) }),
+          }),
+        }),
+      }),
+    };
+
+    return {
+      transaction: (work: (tx: unknown) => Promise<unknown>) => work(transaction),
+    };
+  }
+
+  it('undeletes the row when a deleted day and period is written again', async () => {
+    let conflict: { set: Record<string, unknown> } | undefined;
+    const database = createRecordingDatabase((captured) => { conflict = captured; });
+    const repository = new DrizzleDiaryRepository(
+      database as unknown as Database,
+      { writeInTransaction: vi.fn().mockResolvedValue(undefined) } as unknown as DiaryOutboxWriter,
+    );
+
+    await repository.create('teacher-1', classId, {
+      classSubjectId,
+      description: 'Added unlike fractions',
+      keyPoints: ['LCD'],
+      occurredOn: '2026-07-13',
+      periodLabel: '1st Period',
+      title: 'Fractions',
+    }, { key, requestHash: 'hash', status: 201, userId: 'teacher-1' });
+
+    expect(conflict).toBeDefined();
+    // Without this the write lands on a row every read filters out: a 201 and a
+    // push notification for an entry the teacher can never see again.
+    expect(conflict?.set).toHaveProperty('deletedAt', null);
   });
 });
 

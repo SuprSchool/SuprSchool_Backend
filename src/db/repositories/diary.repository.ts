@@ -600,6 +600,11 @@ export class DrizzleDiaryRepository implements DiaryRepository {
         .onConflictDoUpdate({
           set: {
             classId,
+            // The unique constraint is not partial, so a soft-deleted row still
+            // takes the conflict. Without this reset the write would land on a
+            // row every read filters out: a 201 and a push notification for an
+            // entry the teacher can never see again.
+            deletedAt: null,
             description: input.description,
             keyPoints: input.keyPoints,
             revision: sql`${classDiaryEntries.revision} + 1`,
