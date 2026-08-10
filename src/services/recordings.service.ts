@@ -74,12 +74,17 @@ export interface RecordingResourceFilePort {
 }
 
 /**
- * "What period is it now for this class?", answered by the schedule repository
- * so the timetable has one owner. Narrowed to the single question recordings
- * asks of it.
+ * "Which period was this subject scheduled in, right now?", answered by the
+ * schedule repository so the timetable has one owner. Narrowed to the single
+ * question recordings asks of it.
  */
 export interface RecordingPeriodPort {
-  findClassPeriodLabel(teacherId: string, schoolId: string, classId: string): Promise<string | null>;
+  findClassPeriodLabel(
+    teacherId: string,
+    schoolId: string,
+    classId: string,
+    subjectId: string,
+  ): Promise<string | null>;
 }
 
 export interface RecordingServiceDependencies {
@@ -185,12 +190,17 @@ export function createRecordingService({
 
   return {
     // Resolved once, here, and stored: a recording is subtitled with the period
-    // it happened in, so a later timetable edit must not retitle it.
+    // it happened in, so a later timetable edit must not retitle it. The
+    // recording's own subject is part of the question — the same class/subject
+    // pair the insert below authorizes — so a subject recorded outside its own
+    // slot is out-of-timetable and stores null rather than borrowing the
+    // ordinal of whatever else the teacher was scheduled for.
     async createDraft(identity, input) {
       const period = await periods.findClassPeriodLabel(
         identity.userId,
         identity.schoolId,
         input.classId,
+        input.subjectId,
       );
       return repository.createDraft(identity, { ...input, period });
     },

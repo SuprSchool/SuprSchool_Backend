@@ -58,6 +58,7 @@ export interface ScheduleRepository {
     teacherId: string,
     schoolId: string,
     classId: string,
+    subjectId: string,
   ): Promise<string | null>;
   findStudentTimetable(
     studentId: string,
@@ -132,16 +133,33 @@ export class DrizzleScheduleRepository implements ScheduleRepository {
   public constructor(private readonly db: Database) {}
 
   /**
-   * "What period is it right now for this class?" — the slot covering the
-   * current wall clock, named by its position in that class's day rather than
-   * by any stored label, so the answer cannot drift from the timetable the
-   * schedule screens render. Null when no slot covers the moment, when the
-   * teacher does not own the slot's subject, or when the role is not live.
+   * "Which period was this subject scheduled in, right now?" — the slot
+   * covering the current wall clock **for this subject**, named by its position
+   * in the class's day. Null when no slot covers the moment, when the slot
+   * belongs to a different subject, when the teacher does not own that
+   * subject, or when the role is not live.
+   *
+   * The subject gate is deliberate. A teacher taking two subjects for one class
+   * is inside the timetable all period, so matching on teacher and time alone
+   * would stamp the Maths ordinal on an English recording. Recording a subject
+   * outside its own slot is therefore out-of-timetable, which is the null the
+   * design already renders as the date alone.
+   *
+   * **Known limitation.** The ordinal is the slot's position among that class's
+   * slots for the day, which equals the school's period number only when every
+   * period is a slot row. Free periods are not rows, so a class scheduled in
+   * school periods 2, 4 and 6 is labelled 1st, 2nd and 3rd. No schedule screen
+   * renders an ordinal, so nothing here can contradict them — but the diary
+   * does: `client/app/(teacher)/classes/new-diary.tsx` offers a hardcoded
+   * "1st…8th Period" list and stores the teacher's pick verbatim, so one lesson
+   * can carry two different period labels. A `class_schedule_slots.period_number`
+   * column feeding both is the fix, filed in `docs/parity/SHARED-REQUESTS.md`.
    */
   public async findClassPeriodLabel(
     teacherId: string,
     schoolId: string,
     classId: string,
+    subjectId: string,
   ): Promise<string | null> {
     const rows = await this.db.execute(sql`
       with local_now as (
@@ -165,7 +183,8 @@ export class DrizzleScheduleRepository implements ScheduleRepository {
       join public.user_roles role on role.user_id = ${teacherId}::uuid
         and role.school_id = ${schoolId}::uuid
         and role.role = 'teacher' and role.is_active
-      where local_now.at::time >= day_slots.start_time
+      where day_slots.subject_id = ${subjectId}::uuid
+        and local_now.at::time >= day_slots.start_time
         and local_now.at::time < day_slots.end_time
       order by day_slots.position
       limit 1

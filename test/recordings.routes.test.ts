@@ -1085,7 +1085,9 @@ describe('recording timetable period', () => {
 
     await service.createDraft({ schoolId, userId }, { classId, subjectId, title: 'Algebra' });
 
-    expect(findClassPeriodLabel).toHaveBeenCalledWith(userId, schoolId, classId);
+    // The recording's own subject gates the slot: the label answers "which
+    // period was this subject scheduled in", not "was the teacher busy then".
+    expect(findClassPeriodLabel).toHaveBeenCalledWith(userId, schoolId, classId, subjectId);
     expect(repositoryPort.createDraft).toHaveBeenCalledWith(
       { schoolId, userId },
       { classId, period: '2nd Period', subjectId, title: 'Algebra' },
@@ -1105,6 +1107,31 @@ describe('recording timetable period', () => {
     expect(repositoryPort.createDraft).toHaveBeenCalledWith(
       { schoolId, userId },
       { classId, period: null, subjectId, title: 'Extra' },
+    );
+  });
+
+  // Recording English during the Maths slot is out-of-timetable for English,
+  // which is the same null the design already renders as the date alone.
+  it('stores a null period when the recording subject is not the one scheduled then', async () => {
+    const repositoryPort = draftRepository();
+    const otherSubjectId = '99999999-9999-4999-8999-999999999999';
+    const findClassPeriodLabel = vi.fn(async (
+      _teacherId: string,
+      _schoolId: string,
+      _classId: string,
+      requestedSubjectId: string,
+    ) => (requestedSubjectId === subjectId ? '3rd Period' : null));
+    const service = createRecordingService({
+      periods: { findClassPeriodLabel },
+      repository: repositoryPort,
+      storage: draftStorage(),
+    });
+
+    await service.createDraft({ schoolId, userId }, { classId, subjectId: otherSubjectId, title: 'English' });
+
+    expect(repositoryPort.createDraft).toHaveBeenCalledWith(
+      { schoolId, userId },
+      { classId, period: null, subjectId: otherSubjectId, title: 'English' },
     );
   });
 
