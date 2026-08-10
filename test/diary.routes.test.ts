@@ -595,6 +595,37 @@ describe('diary service', () => {
     }
   });
 
+  it('locks an entry when the school day turns in IST, not when UTC turns', async () => {
+    vi.useFakeTimers();
+    // 20:30Z is 02:00 the next morning in Asia/Kolkata: the school's calendar
+    // day has already turned while UTC still reads 2026-08-10. Against the old
+    // UTC boundary "today" was 2026-08-10, so this entry was not yet in the
+    // past and the move was allowed — the lock engaged 5.5 hours late.
+    vi.setSystemTime(new Date('2026-08-10T20:30:00.000Z'));
+    try {
+      const claim = vi.fn();
+      const service = createDiaryApplicationService({
+        idempotency: { claim } as unknown as IdempotencyStore,
+        outbox: { dispatchPending: vi.fn().mockResolvedValue(undefined) },
+        queue: {} as QueueClient,
+        repository: createRepository({
+          findTeacherDiaryAccess: vi.fn().mockResolvedValue({
+            occurredOn: '2026-08-10',
+            periodLabel: '1st Period',
+            schoolId: 'school-1',
+          }),
+        }),
+      });
+
+      await expect(
+        service.update('teacher-1', diaryId, { occurredOn: '2026-08-11' }, 'diary-update-ist'),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(claim).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('accepts a locked entry whose date and period are echoed back unchanged', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-09T06:00:00.000Z'));

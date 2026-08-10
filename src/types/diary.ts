@@ -1,3 +1,5 @@
+import { TIMETABLE_TIME_ZONE, isoDateInTimeZone } from '../lib/school-time.js';
+
 export interface CursorPage<T> {
   items: T[];
   nextCursor: string | null;
@@ -109,11 +111,16 @@ export function isOccurrenceLocked(occurredOn: string, today: string): boolean {
 }
 
 /**
- * No school-level timezone is modelled anywhere in the schema, so "today" is
- * the server's UTC calendar date.
+ * "Today" on the school's calendar, not the server's.
+ *
+ * This was the server's UTC date, which made the lock engage up to 5.5 hours
+ * late in IST: between 00:00 and 05:30 local, UTC still reads yesterday, so an
+ * entry that had already fallen into the past stayed editable. It now shares
+ * `TIMETABLE_TIME_ZONE` with the schedule repository's period lookup, so both
+ * surfaces agree on when the school day turns.
  */
 export function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10);
+  return isoDateInTimeZone(new Date(), TIMETABLE_TIME_ZONE);
 }
 
 const ORDINAL_SUFFIXES = ['th', 'st', 'nd', 'rd'] as const;

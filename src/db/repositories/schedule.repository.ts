@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gte, isNull, lt, lte, or, sql } from 'drizzle-orm';
 
 import type { Database } from '../client.js';
 import { AppError } from '../../lib/errors.js';
+import { TIMETABLE_TIME_ZONE } from '../../lib/school-time.js';
 import { attendanceRecords, attendanceSessions } from '../schema/attendance.js';
 import {
   academicYears,
@@ -29,14 +30,11 @@ interface StudentClassContext {
 }
 
 /**
- * Timetable slots are naive wall-clock times — `supabase/seed.sql` writes
- * 08:00–11:45, a school morning — while the database session runs in UTC.
- * Every other timetable read takes its date from the client, so the server has
- * never had to name the school's zone; resolving a period server-side does.
- * One school per deployment today; a `schools.time_zone` column is the real
- * fix and is filed in `docs/parity/SHARED-REQUESTS.md`.
+ * Re-exported so this module stays the name existing callers import, while the
+ * definition lives in a dependency-free module the diary types can also reach.
+ * See `src/lib/school-time.ts`.
  */
-export const TIMETABLE_TIME_ZONE = 'Asia/Kolkata';
+export { TIMETABLE_TIME_ZONE };
 
 function ordinal(position: number): string {
   const mod100 = position % 100;
