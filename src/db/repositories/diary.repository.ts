@@ -325,6 +325,10 @@ export class DrizzleDiaryRepository implements DiaryRepository {
         periodLabel: classDiaryEntries.periodLabel,
         revision: classDiaryEntries.revision,
         schoolId: classDiaryEntries.schoolId,
+        // The join below already pins this to the requested subject; selecting
+        // it is what lets a merged, cross-subject feed still name the subject
+        // each entry belongs to.
+        subjectId: classSubjects.subjectId,
         teacherId: classDiaryEntries.teacherId,
         teacherName: userProfiles.displayName,
         title: classDiaryEntries.title,
@@ -380,6 +384,7 @@ export class DrizzleDiaryRepository implements DiaryRepository {
 
     return toCursorPage(rows.map((row) => ({
       ...toTeacherDiaryDto(row),
+      subjectId: row.subjectId,
       teacherName: row.teacherName,
     })), page.limit);
   }
