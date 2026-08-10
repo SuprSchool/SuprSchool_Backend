@@ -394,12 +394,12 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
           inserted.school_id,
           inserted.id,
           ${attachment?.uploadSessionId ?? null}::uuid,
-          ${attachment?.objectPath ?? null},
-          ${attachment?.displayName ?? null},
-          ${attachment?.contentType ?? null},
+          ${attachment?.objectPath ?? null}::text,
+          ${attachment?.displayName ?? null}::text,
+          ${attachment?.contentType ?? null}::text,
           ${attachment?.sizeBytes ?? null}::bigint
         from inserted
-        where ${attachment !== undefined}
+        where ${attachment !== undefined}::boolean
         returning id, display_name, content_type, bytes, object_path, created_at
       )
       select inserted.id, inserted.room_id as "roomId", inserted.client_message_id as "clientMessageId", inserted.body,
