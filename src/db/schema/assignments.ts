@@ -114,6 +114,9 @@ export const assignmentSubmissions = pgTable(
     feedback: text('feedback'),
     gradedAt: timestamp('graded_at', { withTimezone: true }),
     gradedByTeacherId: uuid('graded_by_teacher_id').references(() => userProfiles.id, { onDelete: 'restrict' }),
+    // Set by Mark as Complete, cleared by Mark as Incomplete. Independent of
+    // grading, so it is deliberately outside assignment_submissions_grade_shape_check.
+    completedAt: timestamp('completed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },

@@ -91,13 +91,28 @@ export interface TeacherAssignmentItem {
   title: string;
 }
 
+export const submissionCompletionActions = ['complete', 'incomplete'] as const;
+
+export type SubmissionCompletionAction = (typeof submissionCompletionActions)[number];
+
 export interface AssignmentSubmission {
+  // Required-but-nullable rather than optional: an uncompleted submission is a
+  // known absence every caller must state, not a field it may omit. The client
+  // renders it (668:4935 / 668:4886); no Figma frame specifies a completed-row
+  // treatment yet, so how it is drawn is the client's problem, not this
+  // contract's.
+  completedAt: string | null;
   feedback?: string | undefined;
   gradedAt?: string | undefined;
   id: string;
   marks?: number | undefined;
   studentId: string;
   submittedAt?: string | undefined;
+}
+
+export interface SubmissionCompletion {
+  completedAt: string | null;
+  id: string;
 }
 
 export interface StudentAssignmentListQuery {

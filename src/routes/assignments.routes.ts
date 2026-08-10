@@ -60,6 +60,11 @@ export function createAssignmentsRouter(
     requireCapability('gradeSubmission'),
     controller.grade,
   );
+  router.patch(
+    '/teacher/submissions/:submissionId',
+    requireCapability('gradeSubmission'),
+    controller.setSubmissionCompletion,
+  );
   router.post(
     '/teacher/assignments/:assignmentId/reminder/student/:studentId',
     requireCapability('createAssignment'),
