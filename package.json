@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node dist/server.js",
     "dev": "node --env-file=.env --watch --import tsx src/server.ts",
-    "worker": "tsx src/worker.ts",
+    "worker": "node --env-file=.env --import tsx src/worker.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
@@ -19,6 +19,7 @@
     "provision:qa-auth": "node --env-file=.env --import tsx scripts/provision-qa-auth-users.ts"
   },
   "dependencies": {
+    "@ffprobe-installer/ffprobe": "^2.1.2",
     "@supabase/supabase-js": "^2.57.0",
     "drizzle-orm": "0.45.2",
     "express": "^5.1.0",

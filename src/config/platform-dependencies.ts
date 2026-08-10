@@ -3,6 +3,7 @@ import { Redis } from "ioredis";
 import { sql } from "drizzle-orm";
 
 import { createDatabase, type Database } from "../db/client.js";
+import { logger } from "../lib/logger.js";
 import type { CacheStore } from "../platform/cache/cache-store.js";
 import { NoopCacheStore } from "../platform/cache/noop-cache-store.js";
 import { RedisCacheStore } from "../platform/cache/redis-cache-store.js";
@@ -28,6 +29,7 @@ import {
   NodeCommandRunner,
   RecordingMediaInspector,
 } from "../platform/storage/recording-media-inspector.js";
+import { resolveFfprobeBinary } from "../platform/storage/ffprobe-binary.js";
 import {
   DatabaseRecordingCleanupStore,
   RecordingStorageCleanupHandler,
@@ -142,6 +144,20 @@ export function createRuntimePlatformDependencies(
     },
   );
   const queue = new PgmqQueueClient(db);
+  const ffprobe = resolveFfprobeBinary(env.FFPROBE_PATH);
+  if (ffprobe.source === "unavailable") {
+    logger.error(
+      { configuredFfprobePath: env.FFPROBE_PATH },
+      "ffprobe could not be launched from FFPROBE_PATH and no packaged binary is installed; recording audio confirmation will fail until one is available",
+    );
+  } else if (ffprobe.source === "bundled") {
+    logger.warn(
+      { configuredFfprobePath: env.FFPROBE_PATH, ffprobePath: ffprobe.path },
+      "ffprobe could not be launched from FFPROBE_PATH; falling back to the packaged binary",
+    );
+  } else {
+    logger.info({ ffprobePath: ffprobe.path }, "ffprobe resolved");
+  }
   const recordingMediaInspector = new RecordingMediaInspector({
     commandRunner: new NodeCommandRunner(),
     createSignedReadUrl: async (
@@ -162,7 +178,7 @@ export function createRuntimePlatformDependencies(
       }
       return data.signedUrl;
     },
-    ffprobePath: env.FFPROBE_PATH,
+    ffprobePath: ffprobe.path,
   });
   const recordingStorage = new SupabaseRecordingStorageAdapter({
     inspector: recordingMediaInspector,
