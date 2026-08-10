@@ -90,7 +90,10 @@ export type SubmissionCompletionAction = (typeof submissionCompletionActions)[nu
 
 export interface AssignmentSubmission {
   // Required-but-nullable rather than optional: an uncompleted submission is a
-  // known absence the Completed tab has to draw, not a missing field.
+  // known absence every caller must state, not a field it may omit. The client
+  // renders it (668:4935 / 668:4886); no Figma frame specifies a completed-row
+  // treatment yet, so how it is drawn is the client's problem, not this
+  // contract's.
   completedAt: string | null;
   feedback?: string | undefined;
   gradedAt?: string | undefined;
