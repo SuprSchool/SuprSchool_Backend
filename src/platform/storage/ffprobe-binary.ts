@@ -24,12 +24,22 @@ export interface ResolveFfprobeBinaryOptions {
 
 const LAUNCH_PROBE_TIMEOUT_MILLISECONDS = 10_000;
 
-/** Launches the candidate once; `-version` exits 0 on every ffprobe build. */
-export function canLaunchFfprobe(path: string): boolean {
+/**
+ * Launches the candidate once; `-version` exits 0 on every ffprobe build.
+ *
+ * A missing binary fails immediately with ENOENT, so the timeout only bites
+ * when the binary exists but is slow to start — a cold, ~80 MB, virus-scanned
+ * executable on a loaded host. Callers that probe under heavy concurrency
+ * should raise it; the default is sized for a single boot-time probe.
+ */
+export function canLaunchFfprobe(
+  path: string,
+  timeoutMilliseconds: number = LAUNCH_PROBE_TIMEOUT_MILLISECONDS,
+): boolean {
   const result = spawnSync(path, ['-version'], {
     shell: false,
     stdio: 'ignore',
-    timeout: LAUNCH_PROBE_TIMEOUT_MILLISECONDS,
+    timeout: timeoutMilliseconds,
   });
   return result.error === undefined && result.status === 0;
 }

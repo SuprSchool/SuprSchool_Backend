@@ -42,8 +42,13 @@ describe('ffprobe binary resolution', () => {
     const packaged = bundledFfprobePath();
 
     expect(packaged, 'the per-platform @ffprobe-installer binary must be installed').toBeTypeOf('string');
-    expect(canLaunchFfprobe(packaged ?? '')).toBe(true);
-  });
+    // Generous timeout on purpose: this is the one assertion that spawns the
+    // real ~80 MB binary, and it runs while the rest of the suite saturates the
+    // machine. The boot-time default (10s) timed out here under full-suite load
+    // even though the binary launches in ~0.3s on its own, which made the gate
+    // flaky. What is under test is "the packaged binary runs", not how fast.
+    expect(canLaunchFfprobe(packaged ?? '', 120_000)).toBe(true);
+  }, 130_000);
 
   it('does not treat a missing binary as launchable', () => {
     expect(canLaunchFfprobe('suprschool-ffprobe-that-does-not-exist')).toBe(false);
