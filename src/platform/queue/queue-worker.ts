@@ -196,8 +196,9 @@ export class QueueWorker {
       // A bare `catch {}` here made every handler defect invisible: the queue
       // grew, nothing was archived, and the worker's output stayed clean. The
       // retry path below is unchanged — only the diagnosis is new.
+      const errorCause = safeErrorCause(error);
       logger.error({
-        errorCause: safeErrorCause(error),
+        ...(errorCause === undefined ? {} : { errorCause }),
         errorMessage: safeErrorMessage(error),
         errorName: error instanceof Error ? error.name : typeof error,
         eventId: message.eventId,
