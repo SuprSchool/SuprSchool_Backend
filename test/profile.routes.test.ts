@@ -46,11 +46,13 @@ describe('profile router', () => {
     const profileService = createProfileService();
     vi.mocked(profileService.getProfile).mockResolvedValue({
       avatar: null,
+      className: null,
       displayName: 'Aarav Sharma',
       id: 'user-1',
       interests: [],
       phoneE164: '+917755090948',
       schoolId: 'school-1',
+      section: null,
     });
 
     await request(createApp({
@@ -60,11 +62,13 @@ describe('profile router', () => {
       .get('/v1/profile')
       .expect(200, {
         avatar: null,
+        className: null,
         displayName: 'Aarav Sharma',
         id: 'user-1',
         interests: [],
         phoneE164: '+917755090948',
         schoolId: 'school-1',
+        section: null,
       });
   });
 
@@ -98,25 +102,75 @@ describe('profile router', () => {
     const profileService = createProfileService();
     vi.mocked(profileService.getProfile).mockResolvedValue({
       avatar: { kind: 'preset', value: 'avatar-1' },
+      className: null,
       displayName: 'Aarav Sharma',
       id: 'user-1',
       interests: ['Reading', 'Coding'],
       phoneE164: '+917755090948',
       schoolId: 'school-1',
+      section: null,
     });
 
     await request(createTestApp(profileService))
       .get('/v1/profile')
       .expect(200, {
         avatar: { kind: 'preset', value: 'avatar-1' },
+        className: null,
         displayName: 'Aarav Sharma',
         id: 'user-1',
         interests: ['Reading', 'Coding'],
         phoneE164: '+917755090948',
         schoolId: 'school-1',
+        section: null,
       });
 
-    expect(profileService.getProfile).toHaveBeenCalledWith('user-1');
+    expect(profileService.getProfile).toHaveBeenCalledWith('user-1', 'school-1');
+  });
+
+  // 253:6842 renders "Class 9 • Section B" under the student's name, and the
+  // announcements chip row bolds the same two values. Neither existed on the
+  // contract before this slice, so the client omitted both.
+  it('returns the enrolled class and section on the profile', async () => {
+    const profileService = createProfileService();
+    vi.mocked(profileService.getProfile).mockResolvedValue({
+      avatar: null,
+      className: 'Class 9th - B',
+      displayName: 'Asha Menon',
+      id: 'user-1',
+      interests: [],
+      phoneE164: '+917755090948',
+      schoolId: 'school-1',
+      section: 'B',
+    });
+
+    const response = await request(createTestApp(profileService))
+      .get('/v1/profile')
+      .expect(200);
+
+    expect(response.body.className).toBe('Class 9th - B');
+    expect(response.body.section).toBe('B');
+    expect(profileService.getProfile).toHaveBeenCalledWith('user-1', 'school-1');
+  });
+
+  it('publishes a null class and section for a user with no student enrolment', async () => {
+    const profileService = createProfileService();
+    vi.mocked(profileService.getProfile).mockResolvedValue({
+      avatar: null,
+      className: null,
+      displayName: 'Meera Iyer',
+      id: 'user-1',
+      interests: [],
+      phoneE164: '+917755090948',
+      schoolId: 'school-1',
+      section: null,
+    });
+
+    const response = await request(createTestApp(profileService))
+      .get('/v1/profile')
+      .expect(200);
+
+    expect(response.body.className).toBeNull();
+    expect(response.body.section).toBeNull();
   });
 
   it('replaces only the authenticated teacher interests', async () => {

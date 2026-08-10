@@ -1,8 +1,14 @@
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 
 import type { Database } from '../client.js';
 import { AppError } from '../../lib/errors.js';
-import { profileInterests, userProfiles } from '../schema/core.js';
+import {
+  academicYears,
+  classes,
+  classMembers,
+  profileInterests,
+  userProfiles,
+} from '../schema/core.js';
 import type {
   ProfileAvatarPreset,
   ProfileDescriptor,
@@ -11,7 +17,7 @@ import type {
 import type { AvatarCleanupIntent } from '../../services/avatar.service.js';
 
 export interface ProfileRepository {
-  getProfile(userId: string): Promise<ProfileDescriptor | null>;
+  getProfile(userId: string, schoolId: string): Promise<ProfileDescriptor | null>;
   replaceInterests(userId: string, interests: readonly ProfileInterest[]): Promise<void>;
   setPresetAvatar(userId: string, presetId: ProfileAvatarPreset): Promise<boolean>;
   setUploadedAvatar(
@@ -30,7 +36,7 @@ export interface ProfileRepository {
 export class DrizzleProfileRepository implements ProfileRepository {
   public constructor(private readonly db: Database) {}
 
-  public async getProfile(userId: string): Promise<ProfileDescriptor | null> {
+  public async getProfile(userId: string, schoolId: string): Promise<ProfileDescriptor | null> {
     const [profile] = await this.db
       .select({
         avatarKind: userProfiles.avatarKind,
@@ -41,7 +47,7 @@ export class DrizzleProfileRepository implements ProfileRepository {
         schoolId: userProfiles.schoolId,
       })
       .from(userProfiles)
-      .where(eq(userProfiles.id, userId))
+      .where(and(eq(userProfiles.id, userId), eq(userProfiles.schoolId, schoolId)))
       .limit(1);
 
     if (!profile) return null;
@@ -52,16 +58,54 @@ export class DrizzleProfileRepository implements ProfileRepository {
       .where(eq(profileInterests.userId, userId))
       .orderBy(asc(profileInterests.interest));
 
+    const enrolment = await this.findCurrentEnrolment(userId, schoolId);
+
     return {
       avatar: profile.avatarKind && profile.avatarValue
         ? { kind: profile.avatarKind, value: profile.avatarValue }
         : null,
+      className: enrolment?.className ?? null,
       displayName: profile.displayName,
       id: profile.id,
       interests: interests.map(({ interest }) => interest as ProfileInterest),
       phoneE164: profile.phoneE164,
       schoolId: profile.schoolId,
+      section: enrolment?.section ?? null,
     };
+  }
+
+  /**
+   * The class the user is enrolled in for the current academic year, named from
+   * the same columns the signup directory preview reads
+   * (`school-directory.repository.ts`) and the student class context returns —
+   * `classes.display_name` and `classes.section`. Teachers and anyone without an
+   * active membership resolve to `undefined`, which the caller publishes as
+   * `null` rather than an empty string.
+   */
+  private async findCurrentEnrolment(
+    userId: string,
+    schoolId: string,
+  ): Promise<{ className: string; section: string } | undefined> {
+    const [enrolment] = await this.db
+      .select({ className: classes.displayName, section: classes.section })
+      .from(classMembers)
+      .innerJoin(classes, and(
+        eq(classMembers.classId, classes.id),
+        eq(classes.schoolId, classMembers.schoolId),
+      ))
+      .innerJoin(academicYears, and(
+        eq(classMembers.academicYearId, academicYears.id),
+        eq(academicYears.schoolId, classMembers.schoolId),
+        eq(academicYears.isCurrent, true),
+      ))
+      .where(and(
+        eq(classMembers.studentId, userId),
+        eq(classMembers.schoolId, schoolId),
+        eq(classMembers.isActive, true),
+      ))
+      .limit(1);
+
+    return enrolment;
   }
 
   public async replaceInterests(

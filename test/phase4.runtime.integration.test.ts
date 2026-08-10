@@ -32,7 +32,8 @@ function createDependencies(): AppDependencies {
   const profileService: ProfileService = {
     getProfile: vi.fn().mockResolvedValue({
       avatar: { kind: 'preset', value: 'avatar-student' },
-      displayName: 'Student', id: studentId, interests: [], schoolId,
+      className: 'Class 10th - A', displayName: 'Student', id: studentId, interests: [],
+      schoolId, section: 'A',
     }),
     replaceInterests: vi.fn(),
     setPresetAvatar: vi.fn(),

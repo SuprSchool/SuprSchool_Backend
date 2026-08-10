@@ -82,6 +82,45 @@ describe('exams router', () => {
     );
   });
 
+  // 253:7515 draws one tab per subject beside Overall. Assessments carry a
+  // non-null subject, so the tab selects a real filter rather than a label.
+  it('passes subjectId through to the leaderboard query', async () => {
+    const service = createService();
+    const studentApp = createTestApp(service, { role: 'student', userId: studentId });
+
+    await request(studentApp)
+      .get('/student/exams/groups/' + groupRouteId + '/leaderboard?subjectId=' + subjectRouteId)
+      .expect(200);
+
+    expect(service.getLeaderboard).toHaveBeenCalledWith(
+      { schoolId, userId: studentId },
+      groupRouteId,
+      expect.objectContaining({ subjectId: subjectRouteId }),
+    );
+  });
+
+  it('leaves subjectId absent for the overall leaderboard', async () => {
+    const service = createService();
+    const studentApp = createTestApp(service, { role: 'student', userId: studentId });
+
+    await request(studentApp)
+      .get('/student/exams/groups/' + groupRouteId + '/leaderboard')
+      .expect(200);
+
+    expect(vi.mocked(service.getLeaderboard).mock.calls[0]?.[2].subjectId).toBeUndefined();
+  });
+
+  it('rejects a non-uuid subject before it reaches the leaderboard service', async () => {
+    const service = createService();
+    const studentApp = createTestApp(service, { role: 'student', userId: studentId });
+
+    await request(studentApp)
+      .get('/student/exams/groups/' + groupRouteId + '/leaderboard?subjectId=attacker')
+      .expect(400);
+
+    expect(service.getLeaderboard).not.toHaveBeenCalled();
+  });
+
   it('passes authenticated teacher to result upsert', async () => {
     const service = createService();
     const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
@@ -612,6 +651,21 @@ describe('exam persistence hardening regressions', () => {
     expect(queries[0]).toContain('cm.student_id =');
   });
 
+  // The subject filter has to narrow the scored assessments *and* the
+  // published-assessment audience check, so an unknown subject 404s instead of
+  // returning a board on which everybody scored zero.
+  it('scopes both the leaderboard aggregate and its audience check to the requested subject', async () => {
+    const { queries, repository } = createQueryRecordingRepository();
+
+    await repository.getLeaderboard(
+      { schoolId, userId: studentId }, 'group-1', { limit: 20, subjectId: subjectRouteId },
+    );
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('ce.subject_id');
+    expect(queries[0]).toContain('published_assessment.subject_id');
+  });
+
   it('scopes the teacher result-list query through the live assessment assignment', async () => {
     const queries: string[] = [];
     const callback: RemoteCallback = async (query) => {
@@ -718,6 +772,41 @@ describe('exam re-review hardening regressions', () => {
     await service.getLeaderboard(student, "group-1", { limit: 10 });
 
     expect(getLeaderboard).toHaveBeenCalledTimes(4);
+  });
+
+  // Subject is a scope dimension exactly like limit: two subjects of one group
+  // share a version key, so leaving it out of the cache key would serve
+  // Literature's board on the Math tab.
+  it('keeps first-page leaderboard caches isolated by the requested subject', async () => {
+    const cacheValues = new Map<string, string>();
+    const cache = {
+      get: vi.fn(async (key: string) => cacheValues.get(key) ?? null),
+      invalidateExamGroup: vi.fn(),
+      set: vi.fn(async (key: string, value: string) => { cacheValues.set(key, value); }),
+    };
+    const getLeaderboard = vi.fn(async (_identity, _groupId, query) => ({
+      items: [{ id: query.subjectId ?? 'overall' }],
+    }));
+    const service = createExamsService({
+      cache,
+      files: {} as never,
+      mutations: passthroughMutations(),
+      outbox: { write: vi.fn(), writeInTransaction: vi.fn() },
+      repository: {
+        findGroupForStudent: vi.fn().mockResolvedValue({ id: 'group-1' }),
+        getLeaderboard,
+      } as unknown as ExamsRepository,
+    });
+    const student = { schoolId, userId: studentId };
+
+    const overall = await service.getLeaderboard(student, 'group-1', { limit: 20 });
+    const literature = await service.getLeaderboard(student, 'group-1', { limit: 20, subjectId: subjectRouteId });
+    const cachedOverall = await service.getLeaderboard(student, 'group-1', { limit: 20 });
+
+    expect(getLeaderboard).toHaveBeenCalledTimes(2);
+    expect(overall.items).toEqual([{ id: 'overall' }]);
+    expect(literature.items).toEqual([{ id: subjectRouteId }]);
+    expect(cachedOverall.items).toEqual([{ id: 'overall' }]);
   });
 
 

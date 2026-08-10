@@ -1170,6 +1170,11 @@ export class DrizzleExamsRepository implements ExamsRepository {
     query: LeaderboardQuery,
   ): Promise<CursorPage<LeaderboardEntry> | undefined> {
     const cursor = query.cursor;
+    // 253:7515's subject tabs. Null selects the Overall tab; a subject that the
+    // group never published narrows the audience check to nothing, so the
+    // caller sees the same 404 as an unknown group rather than an all-zero
+    // board that reads as a scoring bug.
+    const subjectId = query.subjectId ?? null;
     const cursorClause = cursor === undefined ? sql`` : sql`
       where (marks < ${cursor.marks})
         or (marks = ${cursor.marks} and (name > ${cursor.name}
@@ -1191,6 +1196,10 @@ export class DrizzleExamsRepository implements ExamsRepository {
             where published_assessment.exam_group_id = eg.id
               and published_assessment.is_published
               and published_assessment.deleted_at is null
+              and (
+                ${subjectId}::uuid is null
+                or published_assessment.subject_id = ${subjectId}::uuid
+              )
           )
       ), group_members as (
         select cm.student_id, cm.roll_number, up.display_name
@@ -1214,6 +1223,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
           and ce.exam_group_id = ${groupId}::uuid
           and ce.is_published and ce.deleted_at is null
           and er.published_at is not null
+          and (${subjectId}::uuid is null or ce.subject_id = ${subjectId}::uuid)
         group by er.student_id
       ), ranked as (
         select gm.student_id, gm.roll_number, gm.display_name as name,
