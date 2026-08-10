@@ -355,7 +355,11 @@ export class DrizzleAnnouncementsRepository implements AnnouncementsRepository {
     const content = {
       ...(input.body === undefined ? {} : { body: input.body }),
       ...(input.category === undefined ? {} : { category: input.category }),
-      ...(input.eventAt === undefined ? {} : { eventAt: new Date(input.eventAt) }),
+      // `new Date(null)` is the 1970 epoch, not a clear — so null must short-circuit
+      // the constructor. Guards the day the validator starts accepting null.
+      ...(input.eventAt === undefined
+        ? {}
+        : { eventAt: input.eventAt === null ? null : new Date(input.eventAt) }),
       ...(input.location === undefined ? {} : { location: input.location }),
       ...(input.title === undefined ? {} : { title: input.title }),
     };

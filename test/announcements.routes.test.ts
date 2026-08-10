@@ -558,6 +558,50 @@ describe('announcement event metadata', () => {
     );
   });
 
+  it('accepts an eventAt carrying a UTC offset, like every other timestamp input', async () => {
+    const service = createService();
+    vi.mocked(service.create).mockResolvedValue({ id: announcementId } as never);
+    vi.mocked(service.update).mockResolvedValue({ id: announcementId } as never);
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+    const offsetInstant = '2026-04-08T11:00:00+05:30';
+
+    await request(teacherApp).post('/teacher/announcements')
+      .set('Idempotency-Key', 'announcement-event-metadata-offset-create')
+      .send({ ...validCreate, eventAt: offsetInstant })
+      .expect(201);
+    await request(teacherApp).patch(`/teacher/announcements/${announcementId}`)
+      .set('Idempotency-Key', 'announcement-event-metadata-offset-update')
+      .send({ eventAt: offsetInstant })
+      .expect(200);
+
+    expect(service.create).toHaveBeenCalledWith(
+      { schoolId, userId: teacherId },
+      { ...validCreate, audienceType: 'class', eventAt: offsetInstant },
+      'announcement-event-metadata-offset-create',
+    );
+    expect(service.update).toHaveBeenCalledWith(
+      { schoolId, userId: teacherId }, announcementId,
+      { eventAt: offsetInstant }, 'announcement-event-metadata-offset-update',
+    );
+  });
+
+  it('clears event metadata with a null rather than writing the 1970 epoch', async () => {
+    const parameters: unknown[][] = [];
+    const callback: RemoteCallback = async (_query, params) => {
+      parameters.push(params);
+      return { rows: [] };
+    };
+    const repository = new DrizzleAnnouncementsRepository(drizzle(callback) as unknown as Database);
+
+    await repository.update({ schoolId, userId: teacherId }, announcementId, {
+      eventAt: null, location: null,
+    });
+
+    const sent = parameters[0] ?? [];
+    expect(sent.filter((value) => value === null)).toHaveLength(2);
+    expect(sent.some((value) => value instanceof Date && value.getTime() === 0)).toBe(false);
+  });
+
   it('rejects a malformed eventAt and an over-long location before the service', async () => {
     const service = createService();
     const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });

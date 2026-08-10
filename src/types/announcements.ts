@@ -110,8 +110,10 @@ export interface UpdateAnnouncementInput {
   body?: string | undefined;
   category?: AnnouncementCategory | undefined;
   classId?: string | undefined;
-  eventAt?: string | undefined;
-  location?: string | undefined;
+  /** `undefined` leaves the column alone; `null` clears it. The validator does not
+   * yet accept `null` — the repository is null-safe ahead of that change. */
+  eventAt?: string | null | undefined;
+  location?: string | null | undefined;
   subjectId?: string | undefined;
   title?: string | undefined;
 }
