@@ -5,6 +5,7 @@ import type { DiaryService } from '../services/diary.service.js';
 import type {
   CreateDiaryInput,
   CursorPageInput,
+  TeacherDiaryPageInput,
   UpdateDiaryInput,
 } from '../types/diary.js';
 import {
@@ -14,11 +15,13 @@ import {
   diaryParamsSchema,
   idempotencyKeySchema,
   subjectParamsSchema,
+  teacherDiaryPageQuerySchema,
   updateDiaryInputSchema,
 } from '../validators/diary.schemas.js';
 
 export interface DiaryController {
   create(request: Request, response: Response): Promise<void>;
+  deleteEntry(request: Request, response: Response): Promise<void>;
   listForStudent(request: Request, response: Response): Promise<void>;
   listForTeacher(request: Request, response: Response): Promise<void>;
   update(request: Request, response: Response): Promise<void>;
@@ -48,6 +51,15 @@ export function createDiaryController(service: DiaryService): DiaryController {
       response.status(201).json(body);
     },
 
+    async deleteEntry(request: Request, response: Response): Promise<void> {
+      const authenticated = identity(request, 'teacher');
+      const { diaryId } = diaryParamsSchema.parse(request.params);
+      response.status(200).json(await service.deleteEntry(diaryId, {
+        schoolId: authenticated.schoolId,
+        teacherId: authenticated.userId,
+      }));
+    },
+
     async listForStudent(request: Request, response: Response): Promise<void> {
       const authenticated = identity(request, 'student');
       const { subjectId } = subjectParamsSchema.parse(request.params);
@@ -63,8 +75,13 @@ export function createDiaryController(service: DiaryService): DiaryController {
     async listForTeacher(request: Request, response: Response): Promise<void> {
       const authenticated = identity(request, 'teacher');
       const { classId } = classParamsSchema.parse(request.params);
-      const page: CursorPageInput = diaryPageQuerySchema.parse(request.query);
-      response.status(200).json(await service.listForTeacher(authenticated.userId, classId, page));
+      const page: TeacherDiaryPageInput = teacherDiaryPageQuerySchema.parse(request.query);
+      response.status(200).json(await service.listForTeacher(
+        authenticated.userId,
+        authenticated.schoolId,
+        classId,
+        page,
+      ));
     },
 
     async update(request: Request, response: Response): Promise<void> {

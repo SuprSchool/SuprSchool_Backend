@@ -16,6 +16,7 @@ const userId = '44444444-4444-4444-8444-444444444444';
 function createDiaryService(): DiaryService {
   return {
     create: vi.fn(),
+    deleteEntry: vi.fn(),
     listForStudent: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     listForTeacher: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
     update: vi.fn(),

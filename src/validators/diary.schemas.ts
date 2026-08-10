@@ -63,6 +63,36 @@ export const diaryPageQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
 });
 
+/** A window wider than a term would expand into an unbounded day-by-day scan. */
+const MAX_DIARY_WINDOW_DAYS = 92;
+const MILLISECONDS_PER_DAY = 86_400_000;
+
+function windowDays(from: string, to: string): number {
+  const start = Date.parse(`${from}T00:00:00.000Z`);
+  const end = Date.parse(`${to}T00:00:00.000Z`);
+  return (end - start) / MILLISECONDS_PER_DAY + 1;
+}
+
+export const teacherDiaryPageQuerySchema = diaryPageQuerySchema
+  .extend({
+    from: isoDateSchema.optional(),
+    to: isoDateSchema.optional(),
+  })
+  .refine(
+    (value) => (value.from === undefined) === (value.to === undefined),
+    { message: 'Provide both from and to, or neither' },
+  )
+  .refine(
+    (value) => value.from === undefined || value.to === undefined || value.from <= value.to,
+    { message: 'from must not be later than to' },
+  )
+  .refine(
+    (value) => value.from === undefined
+      || value.to === undefined
+      || windowDays(value.from, value.to) <= MAX_DIARY_WINDOW_DAYS,
+    { message: `Request at most ${MAX_DIARY_WINDOW_DAYS} days of diary at a time` },
+  );
+
 export const classParamsSchema = z.object({ classId: z.uuid() });
 export const diaryParamsSchema = z.object({ diaryId: z.uuid() });
 export const subjectParamsSchema = z.object({ subjectId: z.uuid() });

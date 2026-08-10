@@ -16,6 +16,7 @@ export function createDiaryRouter(
   router.get('/classes/:classId/diary', controller.listForTeacher);
   router.post('/classes/:classId/diary', controller.create);
   router.patch('/diary/:diaryId', controller.update);
+  router.delete('/diary/:diaryId', controller.deleteEntry);
 
   return router;
 }
