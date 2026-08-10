@@ -4,6 +4,7 @@ import type {
   ChatAttachmentUploadSession,
   ConfirmedChatAttachment,
   CreateChatAttachmentUploadInput,
+  SignedChatAttachmentRead,
 } from '../../types/chat.js';
 import type { ChatAttachmentFilePort } from '../../services/chat.service.js';
 import { academicFileContentTypes } from './academic-file-content-types.js';
@@ -102,7 +103,10 @@ export class ChatAttachmentUploadParentAuthorizer implements UploadParentAuthori
 }
 
 export class ChatAttachmentFileService implements ChatAttachmentFilePort {
-  public constructor(private readonly storage: StorageService) {}
+  public constructor(
+    private readonly storage: StorageService,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
 
   public async createUpload(
     identity: UploadSessionIdentity,
@@ -152,11 +156,20 @@ export class ChatAttachmentFileService implements ChatAttachmentFilePort {
     }
   }
 
-  public createReadUrl(objectPath: string): Promise<string> {
-    return this.storage.createSignedReadUrl(
+  /**
+   * Signs a read and says when that signature dies. The lifetime is this
+   * service's own constant, so it is the only layer that can state the expiry
+   * truthfully — a reader holding the URL has no way to tell.
+   */
+  public async createReadUrl(objectPath: string): Promise<SignedChatAttachmentRead> {
+    const signedUrl = await this.storage.createSignedReadUrl(
       CHAT_ATTACHMENT_BUCKET,
       objectPath,
       CHAT_ATTACHMENT_READ_TTL_SECONDS,
     );
+    return {
+      expiresAt: new Date(this.now().getTime() + CHAT_ATTACHMENT_READ_TTL_SECONDS * 1_000).toISOString(),
+      signedUrl,
+    };
   }
 }

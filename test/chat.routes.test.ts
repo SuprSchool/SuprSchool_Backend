@@ -1,4 +1,5 @@
 import express from 'express';
+import { drizzle } from 'drizzle-orm/postgres-js';
 import type { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
@@ -28,6 +29,31 @@ const unconfirmedSessionId = '00000000-0000-4000-8000-000000000802';
 // message, so the fixture carries it on the access it hands back rather than
 // assuming every sender is a student.
 type Access = ChatRoomAccess & { userId: string; senderRole: 'student' | 'teacher' };
+
+/** The shape postgres-js raises for a unique violation. */
+function postgresUniqueViolation(constraintName: string): Error {
+  return Object.assign(
+    new Error(`duplicate key value violates unique constraint "${constraintName}"`),
+    { code: '23505', constraint_name: constraintName, name: 'PostgresError', severity: 'ERROR' },
+  );
+}
+
+/**
+ * A real drizzle instance over a driver that always fails, so the value the
+ * repository catches is genuinely `DrizzleQueryError` with the driver error on
+ * `.cause` — the wrapping production sees, and the reason a guard that reads
+ * only the top level silently never fires.
+ */
+function databaseRejectingWith(error: Error): Database {
+  const client = {
+    options: { parsers: {}, serializers: {} },
+    unsafe: () => {
+      const run = async (): Promise<never> => { throw error; };
+      return Object.assign(run(), { values: run });
+    },
+  };
+  return drizzle({ client: client as never }) as unknown as Database;
+}
 
 function cursor(createdAt: string, id: string): string {
   return Buffer.from(JSON.stringify({ createdAt, id })).toString('base64url');
@@ -105,7 +131,10 @@ function createFiles() {
       };
     },
     async createReadUrl(objectPath) {
-      return `https://signed.example/read/${objectPath}`;
+      return {
+        expiresAt: '2026-08-08T10:15:00.000Z',
+        signedUrl: `https://signed.example/read/${objectPath}`,
+      };
     },
   };
   return { confirmations, port, uploadRequests };
@@ -261,6 +290,7 @@ describe('chat REST API', () => {
     expect(files.confirmations).toEqual([confirmedSessionId]);
     expect(response.body.attachments).toEqual([{
       contentType: 'application/pdf',
+      expiresAt: '2026-08-08T10:15:00.000Z',
       id: expect.any(String),
       name: 'notes.pdf',
       signedUrl: `https://signed.example/read/${schoolId}/chat-attachment/${roomId}/${confirmedSessionId}`,
@@ -467,6 +497,7 @@ describe('chat REST API', () => {
     expect(response.body.attachments).toHaveLength(1);
     expect(response.body.attachments[0]).toEqual({
       contentType: 'application/pdf',
+      expiresAt: '2026-08-08T10:15:00.000Z',
       id: expect.any(String),
       name: 'notes.pdf',
       signedUrl: `https://signed.example/read/${schoolId}/chat-attachment/${roomId}/${confirmedSessionId}`,
@@ -517,15 +548,17 @@ describe('chat REST API', () => {
     expect(messages).toHaveLength(1);
   });
 
-  it('maps the attachment unique violation to a distinct client answer', async () => {
-    const uniqueViolation = Object.assign(new Error('duplicate key value violates unique constraint'), {
-      code: '23505',
-      constraint_name: 'chat_message_attachments_upload_session_unique',
-    });
-    const database = {
-      async execute() { throw uniqueViolation; },
-    } as unknown as Database;
-    const repository = new DrizzleChatRepository(database);
+  // Driven through a real drizzle instance so the thrown value has the shape
+  // production actually sees: drizzle rethrows every failure as
+  // DrizzleQueryError with the driver error on `.cause`. A hand-built error
+  // would pass a guard that reads only the top level, which is what shipped.
+  it.each([
+    'chat_message_attachments_upload_session_unique',
+    'chat_message_attachments_object_path_unique',
+  ])('maps a %s violation raised through drizzle to a distinct client answer', async (constraintName) => {
+    const repository = new DrizzleChatRepository(
+      databaseRejectingWith(postgresUniqueViolation(constraintName)),
+    );
 
     await expect(repository.insertMessage(
       { classId: '00000000-0000-4000-8000-000000000301', id: roomId, kind: 'class', schoolId, subjectId: null, userId: studentId },

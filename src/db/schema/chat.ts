@@ -118,8 +118,10 @@ export const chatMessageAttachments = pgTable(
       sql`char_length(${table.contentType}) between 1 and 255`,
     ),
     check('chat_message_attachments_bytes_check', sql`${table.bytes} > 0`),
-    uniqueIndex('chat_message_attachments_upload_session_unique').on(table.uploadSessionId),
-    uniqueIndex('chat_message_attachments_object_path_unique').on(table.objectPath),
+    // Named to match the applied migration's constraints, which the repository
+    // matches by name when a re-sent attachment is refused.
+    unique('chat_message_attachments_upload_session_unique').on(table.uploadSessionId),
+    unique('chat_message_attachments_object_path_unique').on(table.objectPath),
     index('chat_message_attachments_message_idx').on(
       table.schoolId,
       table.messageId,

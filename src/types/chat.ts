@@ -34,6 +34,12 @@ export interface ChatMessageAttachment {
   contentType: string;
   sizeBytes: number;
   signedUrl: string;
+  /**
+   * When `signedUrl` stops working. A reader cannot tell a stale signature
+   * from a live one by looking at it — the URL is well-formed either way and
+   * opens the storage provider's error page — so the expiry travels with it.
+   */
+  expiresAt: string;
 }
 
 export interface StoredChatMessage {
@@ -108,6 +114,11 @@ export interface CreateChatAttachmentUploadInput {
 export interface ChatAttachmentUploadSession {
   id: string;
   signedUploadUrl: string;
+  expiresAt: string;
+}
+
+export interface SignedChatAttachmentRead {
+  signedUrl: string;
   expiresAt: string;
 }
 

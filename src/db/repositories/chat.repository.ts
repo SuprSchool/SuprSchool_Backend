@@ -63,7 +63,16 @@ function attachmentsFromRow(value: unknown): readonly StoredChatAttachment[] {
   }));
 }
 
-const ATTACHMENT_SESSION_UNIQUE = 'chat_message_attachments_upload_session_unique';
+/**
+ * The two constraints a re-sent attachment can violate. Both are named
+ * explicitly in the migration precisely so they can be matched here: an
+ * auto-named `..._upload_session_id_key` could only be matched by guessing at
+ * Postgres's naming rule.
+ */
+const ATTACHMENT_CONFLICT_CONSTRAINTS = [
+  'chat_message_attachments_upload_session_unique',
+  'chat_message_attachments_object_path_unique',
+];
 
 /**
  * One confirmed upload belongs to exactly one message, forever.
@@ -71,18 +80,34 @@ const ATTACHMENT_SESSION_UNIQUE = 'chat_message_attachments_upload_session_uniqu
  * A send whose response was lost leaves the file uploaded and the composer
  * still holding it. Editing the text produces a new client message id, so the
  * idempotency key no longer matches and the confirm — being idempotent —
- * succeeds; only the attachment's unique index stops the second write. Left
- * unmapped that is a 500 on every retry, under copy blaming the connection for
- * a file that already arrived. A distinct answer lets the composer say so and
- * release the attachment.
+ * succeeds; only the attachment's unique constraints stop the second write.
+ * Left unmapped that is a 500 on every retry, under copy blaming the
+ * connection for a file that already arrived.
+ *
+ * Drizzle rethrows every query failure as `DrizzleQueryError` with the driver
+ * error on `.cause`, so the check walks the chain rather than reading the top
+ * level — which is always the wrapper, and never carries `code`.
  */
 function isAttachmentSessionConflict(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false;
-  const candidate = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown; message?: unknown };
-  if (candidate.code !== '23505') return false;
-  return candidate.constraint_name === ATTACHMENT_SESSION_UNIQUE
-    || candidate.constraint === ATTACHMENT_SESSION_UNIQUE
-    || (typeof candidate.message === 'string' && candidate.message.includes(ATTACHMENT_SESSION_UNIQUE));
+  for (let current = error, depth = 0; current !== null && current !== undefined && depth < 5; depth += 1) {
+    if (typeof current !== 'object') return false;
+    const candidate = current as {
+      cause?: unknown;
+      code?: unknown;
+      constraint?: unknown;
+      constraint_name?: unknown;
+      message?: unknown;
+    };
+    if (candidate.code === '23505' && ATTACHMENT_CONFLICT_CONSTRAINTS.some((name) => (
+      candidate.constraint_name === name
+      || candidate.constraint === name
+      || (typeof candidate.message === 'string' && candidate.message.includes(name))
+    ))) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
 }
 
 /** The attachment projection every message read shares. */

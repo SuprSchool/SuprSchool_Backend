@@ -20,6 +20,7 @@ import type {
   ConfirmedChatAttachment,
   CreateChatAttachmentUploadInput,
   SendChatMessageInput,
+  SignedChatAttachmentRead,
   StoredChatMessage,
 } from '../types/chat.js';
 
@@ -41,7 +42,7 @@ export interface ChatAttachmentFilePort {
     roomId: string,
     uploadSessionId: string,
   ): Promise<ConfirmedChatAttachment>;
-  createReadUrl(objectPath: string): Promise<string>;
+  createReadUrl(objectPath: string): Promise<SignedChatAttachmentRead>;
 }
 
 export interface ChatService {
@@ -82,13 +83,17 @@ export function createChatService({
   async function toMessage(stored: StoredChatMessage): Promise<ChatMessageDto> {
     return {
       ...stored,
-      attachments: await Promise.all(stored.attachments.map(async (attachment) => ({
-        contentType: attachment.contentType,
-        id: attachment.id,
-        name: attachment.name,
-        signedUrl: await files.createReadUrl(attachment.objectPath),
-        sizeBytes: attachment.sizeBytes,
-      }))),
+      attachments: await Promise.all(stored.attachments.map(async (attachment) => {
+        const read = await files.createReadUrl(attachment.objectPath);
+        return {
+          contentType: attachment.contentType,
+          expiresAt: read.expiresAt,
+          id: attachment.id,
+          name: attachment.name,
+          signedUrl: read.signedUrl,
+          sizeBytes: attachment.sizeBytes,
+        };
+      })),
     };
   }
 

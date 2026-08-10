@@ -9,16 +9,22 @@
 -- `upload_session_id` is a restricting reference: a confirmed session stays for
 -- as long as the attachment it produced, which keeps the storage-cleanup
 -- sweeps from reclaiming an object a live message still points at.
+-- Both unique constraints are NAMED. An inline `unique` would be auto-named
+-- `chat_message_attachments_upload_session_id_key`, which no code could match
+-- deliberately — and re-sending a spent session has to be answered by name,
+-- not swallowed as a generic write failure.
 create table public.chat_message_attachments (
   id uuid primary key default gen_random_uuid(),
   school_id uuid not null references public.schools(id) on delete cascade,
   message_id uuid not null references public.chat_messages(id) on delete cascade,
-  upload_session_id uuid not null unique references public.upload_sessions(id) on delete restrict,
-  object_path text not null unique,
+  upload_session_id uuid not null references public.upload_sessions(id) on delete restrict,
+  object_path text not null,
   display_name text not null check (char_length(display_name) between 1 and 255),
   content_type text not null check (char_length(content_type) between 1 and 255),
   bytes bigint not null check (bytes > 0),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint chat_message_attachments_upload_session_unique unique (upload_session_id),
+  constraint chat_message_attachments_object_path_unique unique (object_path)
 );
 
 create index chat_message_attachments_message_idx
@@ -37,8 +43,9 @@ grant select, insert, update, delete on table public.chat_message_attachments to
 --
 -- The attachment row lands in the same statement as its message, so this
 -- AFTER ROW trigger (queued to end of statement) already sees it. `signedUrl`
--- is null rather than absent: Postgres cannot sign a storage URL, and null
--- says "not signed in this payload" instead of inventing a value.
+-- and `expiresAt` are both null rather than absent: Postgres cannot sign a
+-- storage URL, and null says "not signed in this payload" instead of
+-- inventing a value the reader would then act on.
 create or replace function public.broadcast_chat_message()
 returns trigger
 language plpgsql
@@ -73,7 +80,8 @@ begin
         'name', attachment.display_name,
         'contentType', attachment.content_type,
         'sizeBytes', attachment.bytes,
-        'signedUrl', null
+        'signedUrl', null,
+        'expiresAt', null
       )
       order by attachment.created_at, attachment.id
     ),
