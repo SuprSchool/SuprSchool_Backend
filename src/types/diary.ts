@@ -13,6 +13,16 @@ export interface CursorPageInput {
   limit: number;
 }
 
+/**
+ * `from`/`to` bound the calendar window a teacher is looking at. They arrive
+ * together or not at all, and only a bounded window can report the scheduled
+ * periods that never received a diary entry.
+ */
+export interface TeacherDiaryPageInput extends CursorPageInput {
+  from?: string | undefined;
+  to?: string | undefined;
+}
+
 export interface CreateDiaryInput {
   classSubjectId: string;
   description: string;
@@ -50,6 +60,76 @@ export interface DiaryRecord extends TeacherDiaryDto {
 
 export interface StudentDiaryDto extends TeacherDiaryDto {
   teacherName: string;
+}
+
+/**
+ * `occurrenceLocked` marks an entry whose occurrence date has passed, so its
+ * date and period can no longer be moved. It is derived per response rather
+ * than stored, so a replayed idempotent write never reports a stale lock.
+ */
+export interface DiaryEntryView extends TeacherDiaryDto {
+  occurrenceLocked: boolean;
+}
+
+export interface TeacherDiaryListEntry extends DiaryEntryView {
+  missing: false;
+}
+
+/** A scheduled teaching period in the requested window that has no diary entry. */
+export interface MissingDiaryPeriodDto {
+  classId: string;
+  classSubjectId: string;
+  missing: true;
+  occurredOn: string;
+  periodLabel: string;
+}
+
+export type TeacherDiaryListItem = TeacherDiaryListEntry | MissingDiaryPeriodDto;
+
+export interface ScheduledPeriodDto {
+  classId: string;
+  classSubjectId: string;
+  occurredOn: string;
+  periodLabel: string;
+}
+
+export interface DeletedDiaryDto {
+  deletedAt: string;
+  id: string;
+}
+
+export interface DiaryActor {
+  schoolId: string;
+  teacherId: string;
+}
+
+/** An entry may no longer move once its occurrence date is in the past. */
+export function isOccurrenceLocked(occurredOn: string, today: string): boolean {
+  return occurredOn < today;
+}
+
+/**
+ * No school-level timezone is modelled anywhere in the schema, so "today" is
+ * the server's UTC calendar date.
+ */
+export function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+const ORDINAL_SUFFIXES = ['th', 'st', 'nd', 'rd'] as const;
+
+/**
+ * `class_schedule_slots` carries no label, so a slot's period name is its
+ * position in that day's timetable — the same "1st Period" wording teachers
+ * type when they write the diary entry.
+ */
+export function formatPeriodLabel(periodNumber: number): string {
+  const remainderTen = periodNumber % 10;
+  const remainderHundred = periodNumber % 100;
+  const suffix = remainderTen < 4 && remainderHundred - remainderTen !== 10
+    ? ORDINAL_SUFFIXES[remainderTen]
+    : ORDINAL_SUFFIXES[0];
+  return `${periodNumber}${suffix ?? 'th'} Period`;
 }
 
 export function encodeDiaryCursor(cursor: DiaryCursor): string {

@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, lt, lte, or, sql } from 'drizzle-orm';
 
 import type { Database } from '../client.js';
 import type { DiaryOutboxWriter } from '../../async/diary/diary-outbox.js';
@@ -6,19 +6,34 @@ import { createDiaryPublishedMessage } from '../../async/diary/diary-published.m
 import { classDiaryEntries } from '../schema/diary.js';
 import { classMembers, classSubjects, userProfiles, userRoles } from '../schema/core.js';
 import { AppError } from '../../lib/errors.js';
-import { encodeDiaryCursor } from '../../types/diary.js';
+import { encodeDiaryCursor, formatPeriodLabel } from '../../types/diary.js';
 import type {
   CreateDiaryInput,
   CursorPage,
   CursorPageInput,
+  DeletedDiaryDto,
+  DiaryActor,
   DiaryRecord,
+  ScheduledPeriodDto,
   StudentDiaryDto,
   TeacherDiaryDto,
+  TeacherDiaryPageInput,
   UpdateDiaryInput,
 } from '../../types/diary.js';
 
 interface TeacherClassAccess {
   schoolId: string;
+}
+
+interface TeacherDiaryAccess extends TeacherClassAccess {
+  occurredOn: string;
+}
+
+interface UncoveredPeriodRow {
+  classId: string;
+  classSubjectId: string;
+  occurredOn: string;
+  periodNumber: number;
 }
 
 export interface DiaryIdempotencyCompletion {
@@ -55,7 +70,7 @@ export interface DiaryRepository {
     classId: string,
     classSubjectId: string,
   ): Promise<TeacherClassAccess | undefined>;
-  findTeacherDiaryAccess(teacherId: string, diaryId: string): Promise<TeacherClassAccess | undefined>;
+  findTeacherDiaryAccess(teacherId: string, diaryId: string): Promise<TeacherDiaryAccess | undefined>;
   listForStudent(
     userId: string,
     schoolId: string,
@@ -64,9 +79,17 @@ export interface DiaryRepository {
   ): Promise<CursorPage<StudentDiaryDto>>;
   listForTeacher(
     teacherId: string,
+    schoolId: string,
     classId: string,
-    page: CursorPageInput,
+    page: TeacherDiaryPageInput,
   ): Promise<CursorPage<TeacherDiaryDto>>;
+  listUncoveredScheduledPeriods(
+    teacherId: string,
+    schoolId: string,
+    classId: string,
+    window: { from: string; to: string },
+  ): Promise<ScheduledPeriodDto[]>;
+  softDelete(diaryId: string, actor: DiaryActor): Promise<DeletedDiaryDto | undefined>;
   create(
     teacherId: string,
     classId: string,
@@ -250,9 +273,12 @@ export class DrizzleDiaryRepository implements DiaryRepository {
   public async findTeacherDiaryAccess(
     teacherId: string,
     diaryId: string,
-  ): Promise<TeacherClassAccess | undefined> {
+  ): Promise<TeacherDiaryAccess | undefined> {
     const [access] = await this.db
-      .select({ schoolId: classDiaryEntries.schoolId })
+      .select({
+        occurredOn: classDiaryEntries.occurredOn,
+        schoolId: classDiaryEntries.schoolId,
+      })
       .from(classDiaryEntries)
       .innerJoin(
         classSubjects,
@@ -358,8 +384,9 @@ export class DrizzleDiaryRepository implements DiaryRepository {
 
   public async listForTeacher(
     teacherId: string,
+    schoolId: string,
     classId: string,
-    page: CursorPageInput,
+    page: TeacherDiaryPageInput,
   ): Promise<CursorPage<TeacherDiaryDto>> {
     const rows = await this.db
       .select({
@@ -395,8 +422,11 @@ export class DrizzleDiaryRepository implements DiaryRepository {
         ),
       )
       .where(and(
+        eq(classDiaryEntries.schoolId, schoolId),
         eq(classDiaryEntries.classId, classId),
         isNull(classDiaryEntries.deletedAt),
+        page.from === undefined ? undefined : gte(classDiaryEntries.occurredOn, page.from),
+        page.to === undefined ? undefined : lte(classDiaryEntries.occurredOn, page.to),
         page.cursor === undefined ? undefined : or(
           lt(classDiaryEntries.occurredOn, page.cursor.occurredOn),
           and(
@@ -409,6 +439,117 @@ export class DrizzleDiaryRepository implements DiaryRepository {
       .limit(page.limit + 1);
 
     return toCursorPage(rows.map(toTeacherDiaryDto), page.limit);
+  }
+
+  /**
+   * Scheduled periods in the window that carry no diary entry.
+   *
+   * A slot is matched to an entry on (class subject, date) rather than on the
+   * period label: `class_schedule_slots` stores no label at all, and
+   * `period_label` is free text the teacher types, so the two cannot be joined
+   * on it. A day whose subject already has an entry is therefore covered.
+   */
+  public async listUncoveredScheduledPeriods(
+    teacherId: string,
+    schoolId: string,
+    classId: string,
+    window: { from: string; to: string },
+  ): Promise<ScheduledPeriodDto[]> {
+    const rows = await this.db.execute(sql`
+      with scheduled as (
+        select
+          slot.class_id,
+          slot.school_id,
+          slot.subject_id,
+          slot.day_of_week,
+          row_number() over (
+            partition by slot.class_id, slot.day_of_week
+            order by slot.start_time
+          ) as period_number
+        from public.class_schedule_slots slot
+        where slot.class_id = ${classId}::uuid
+          and slot.school_id = ${schoolId}::uuid
+      )
+      select
+        scheduled.class_id as "classId",
+        subject.id as "classSubjectId",
+        day.occurred_on::text as "occurredOn",
+        scheduled.period_number::int as "periodNumber"
+      from (
+        select generate_series(${window.from}::date, ${window.to}::date, interval '1 day')::date
+          as occurred_on
+      ) as day
+      join scheduled on scheduled.day_of_week = extract(dow from day.occurred_on)
+      join public.class_subjects subject
+        on subject.school_id = scheduled.school_id
+       and subject.class_id = scheduled.class_id
+       and subject.subject_id = scheduled.subject_id
+       and subject.teacher_id = ${teacherId}::uuid
+      where exists (
+        select 1
+        from public.user_roles role
+        where role.user_id = ${teacherId}::uuid
+          and role.school_id = scheduled.school_id
+          and role.role = 'teacher'
+          and role.is_active
+      )
+      and not exists (
+        select 1
+        from public.class_diary_entries entry
+        where entry.school_id = scheduled.school_id
+          and entry.class_subject_id = subject.id
+          and entry.occurred_on = day.occurred_on
+          and entry.deleted_at is null
+      )
+      order by day.occurred_on desc, scheduled.period_number
+    `);
+
+    return (rows as unknown as ReadonlyArray<UncoveredPeriodRow>).map((row) => ({
+      classId: row.classId,
+      classSubjectId: row.classSubjectId,
+      occurredOn: row.occurredOn,
+      periodLabel: formatPeriodLabel(row.periodNumber),
+    }));
+  }
+
+  /**
+   * Soft-deletes an entry. Scoped to the acting school and guarded by the same
+   * ownership predicate the update path enforces, so an entry belonging to
+   * another school or another teacher simply does not match.
+   */
+  public async softDelete(
+    diaryId: string,
+    actor: DiaryActor,
+  ): Promise<DeletedDiaryDto | undefined> {
+    const rows = await this.db.execute(sql`
+      update public.class_diary_entries entry
+      set deleted_at = now()
+      from public.class_subjects subject
+      where entry.id = ${diaryId}::uuid
+        and entry.school_id = ${actor.schoolId}::uuid
+        and entry.deleted_at is null
+        and subject.id = entry.class_subject_id
+        and subject.school_id = entry.school_id
+        and subject.teacher_id = ${actor.teacherId}::uuid
+        and exists (
+          select 1
+          from public.user_roles role
+          where role.user_id = ${actor.teacherId}::uuid
+            and role.school_id = entry.school_id
+            and role.role = 'teacher'
+            and role.is_active
+        )
+      returning entry.id as "id", entry.deleted_at as "deletedAt"
+    `);
+    const [deleted] = rows as unknown as ReadonlyArray<{ deletedAt: Date | string; id: string }>;
+    if (deleted === undefined) return undefined;
+
+    return {
+      deletedAt: deleted.deletedAt instanceof Date
+        ? deleted.deletedAt.toISOString()
+        : deleted.deletedAt,
+      id: deleted.id,
+    };
   }
 
   public async create(
