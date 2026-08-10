@@ -25,6 +25,10 @@ export const classAnnouncements = pgTable(
     category: studentAnnouncementCategory('category').notNull(),
     title: text('title').notNull(),
     body: text('body').notNull(),
+    /** Optional venue row on the announcement card (594:15213 card 4). */
+    location: text('location'),
+    /** Optional event date/time. Distinct from publishedAt, which is the publication instant. */
+    eventAt: timestamp('event_at', { withTimezone: true }),
     isPublished: boolean('is_published').default(false).notNull(),
     publishedAt: timestamp('published_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),

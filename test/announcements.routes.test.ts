@@ -260,8 +260,11 @@ describe('announcement publication integration regression', () => {
       category: 'Class',
       classId,
       createdAt: new Date('2026-07-13T00:00:00.000Z'),
+      // Every post-migration row carries both columns, null when unset.
+      eventAt: null,
       id: announcementId,
       isPublished,
+      location: null,
       publishedAt: null,
       schoolId,
       subjectId,
@@ -514,6 +517,119 @@ describe('announcement app mount', () => {
   });
 });
 
+
+describe('announcement event metadata', () => {
+  const eventAt = '2026-04-08T11:00:00.000Z';
+
+  it('forwards location and eventAt through create rather than stripping them', async () => {
+    const service = createService();
+    vi.mocked(service.create).mockResolvedValue({
+      id: announcementId, eventAt, location: 'Main Auditorium',
+    } as never);
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    const response = await request(teacherApp).post('/teacher/announcements')
+      .set('Idempotency-Key', 'announcement-event-metadata-1')
+      .send({ ...validCreate, eventAt, location: 'Main Auditorium' })
+      .expect(201);
+
+    expect(service.create).toHaveBeenCalledWith(
+      { schoolId, userId: teacherId },
+      { ...validCreate, audienceType: 'class', eventAt, location: 'Main Auditorium' },
+      'announcement-event-metadata-1',
+    );
+    expect(response.body.location).toBe('Main Auditorium');
+    expect(response.body.eventAt).toBe(eventAt);
+  });
+
+  it('accepts an edit that changes only the event metadata', async () => {
+    const service = createService();
+    vi.mocked(service.update).mockResolvedValue({ id: announcementId } as never);
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp).patch(`/teacher/announcements/${announcementId}`)
+      .set('Idempotency-Key', 'announcement-event-metadata-2')
+      .send({ eventAt, location: 'Main Auditorium' })
+      .expect(200);
+
+    expect(service.update).toHaveBeenCalledWith(
+      { schoolId, userId: teacherId }, announcementId,
+      { eventAt, location: 'Main Auditorium' }, 'announcement-event-metadata-2',
+    );
+  });
+
+  it('rejects a malformed eventAt and an over-long location before the service', async () => {
+    const service = createService();
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp).post('/teacher/announcements')
+      .set('Idempotency-Key', 'announcement-event-metadata-bad-date')
+      .send({ ...validCreate, eventAt: 'the eighth of April' })
+      .expect(400);
+    await request(teacherApp).post('/teacher/announcements')
+      .set('Idempotency-Key', 'announcement-event-metadata-long-location')
+      .send({ ...validCreate, location: 'A'.repeat(201) })
+      .expect(400);
+
+    expect(service.create).not.toHaveBeenCalled();
+  });
+
+  it('reads location and event_at onto teacher list items, null when the row has none', async () => {
+    const callback: RemoteCallback = async () => ({
+      rows: [
+        [
+          'class', 'Bring your textbook tomorrow.', 'Class', classId,
+          new Date('2026-07-13T00:00:00.000Z'), new Date(eventAt), announcementId,
+          'Main Auditorium', new Date('2026-04-01T00:00:00.000Z'), subjectId, teacherId,
+          'Math Olympiad',
+        ],
+        [
+          'school', 'School closes early tomorrow.', 'School', null,
+          new Date('2026-07-12T00:00:00.000Z'), null, announcementResourceId,
+          null, new Date('2026-03-01T00:00:00.000Z'), null, teacherId,
+          'Early closure',
+        ],
+      ],
+    });
+    const repository = new DrizzleAnnouncementsRepository(drizzle(callback) as unknown as Database);
+
+    const page = await repository.listForTeacher({ schoolId, userId: teacherId }, { limit: 20 });
+
+    expect(page.items[0]).toMatchObject({ eventAt, location: 'Main Auditorium' });
+    // Absent metadata is null, never '' and never the publication date.
+    expect(page.items[1]).toMatchObject({ eventAt: null, location: null });
+  });
+
+  it('persists location and event_at on the create and update writes', async () => {
+    const queries: string[] = [];
+    const callback: RemoteCallback = async (query) => {
+      queries.push(query);
+      return { rows: [] };
+    };
+    const repository = new DrizzleAnnouncementsRepository(drizzle(callback) as unknown as Database);
+
+    await repository.create({ schoolId, userId: teacherId }, {
+      audienceType: 'school', body: 'School closes early.', category: 'School',
+      eventAt, location: 'Main Auditorium', title: 'Early closure',
+    });
+    await repository.update({ schoolId, userId: teacherId }, announcementId, {
+      eventAt, location: 'Main Auditorium',
+    });
+
+    expect(queries[0]).toContain('location');
+    expect(queries[0]).toContain('event_at');
+    expect(queries[1]).toContain('"location"');
+    expect(queries[1]).toContain('"event_at"');
+  });
+
+  it('keeps both columns on the announcements table definition', () => {
+    const source = readFileSync(
+      new URL('../src/db/schema/announcements.ts', import.meta.url), 'utf8',
+    );
+    expect(source).toContain("text('location')");
+    expect(source).toContain("timestamp('event_at', { withTimezone: true })");
+  });
+});
 
 describe("announcement final write authorization", () => {
   it("keeps the live class-subject predicate in every decisive announcement write", () => {

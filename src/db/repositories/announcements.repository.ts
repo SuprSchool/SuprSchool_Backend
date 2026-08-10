@@ -94,8 +94,10 @@ type AnnouncementRow = {
   category: AnnouncementCategory;
   classId: string | null;
   createdAt: Date;
+  eventAt: Date | null;
   id: string;
   isPublished: boolean;
+  location: string | null;
   publishedAt: Date | null;
   schoolId: string;
   subjectId: string | null;
@@ -200,7 +202,9 @@ export class DrizzleAnnouncementsRepository implements AnnouncementsRepository {
         category: classAnnouncements.category,
         classId: classAnnouncements.classId,
         createdAt: classAnnouncements.createdAt,
+        eventAt: classAnnouncements.eventAt,
         id: classAnnouncements.id,
+        location: classAnnouncements.location,
         publishedAt: classAnnouncements.publishedAt,
         subjectId: classAnnouncements.subjectId,
         teacherId: classAnnouncements.teacherId,
@@ -235,8 +239,10 @@ export class DrizzleAnnouncementsRepository implements AnnouncementsRepository {
       audienceType: row.audienceType,
       ...(row.classId === null ? {} : { classId: row.classId }),
       description: row.body,
+      eventAt: toIso(row.eventAt),
       id: row.id,
       isOwn: row.teacherId === identity.userId,
+      location: row.location,
       publishedAt: toIso(row.publishedAt),
       ...(row.subjectId === null ? {} : { subjectId: row.subjectId }),
       title: row.title,
@@ -260,7 +266,8 @@ export class DrizzleAnnouncementsRepository implements AnnouncementsRepository {
   ): Promise<StoredAnnouncementDetail | undefined> {
     const rows = await this.db.execute(sql<AnnouncementRow>`
       insert into public.class_announcements (
-        school_id, audience_type, class_id, subject_id, teacher_id, category, title, body
+        school_id, audience_type, class_id, subject_id, teacher_id, category, title, body,
+        location, event_at
       )
       select
         ${identity.schoolId}::uuid,
@@ -270,7 +277,9 @@ export class DrizzleAnnouncementsRepository implements AnnouncementsRepository {
         ${identity.userId}::uuid,
         ${input.category},
         ${input.title},
-        ${input.body}
+        ${input.body},
+        ${input.location ?? null}::text,
+        ${input.eventAt ?? null}::timestamptz
       from public.user_roles teacher_role
       where teacher_role.school_id = ${identity.schoolId}::uuid
         and teacher_role.user_id = ${identity.userId}::uuid
@@ -292,8 +301,10 @@ export class DrizzleAnnouncementsRepository implements AnnouncementsRepository {
         category,
         class_id as "classId",
         created_at as "createdAt",
+        event_at as "eventAt",
         id,
         is_published as "isPublished",
+        location,
         published_at as "publishedAt",
         school_id as "schoolId",
         subject_id as "subjectId",
@@ -344,6 +355,8 @@ export class DrizzleAnnouncementsRepository implements AnnouncementsRepository {
     const content = {
       ...(input.body === undefined ? {} : { body: input.body }),
       ...(input.category === undefined ? {} : { category: input.category }),
+      ...(input.eventAt === undefined ? {} : { eventAt: new Date(input.eventAt) }),
+      ...(input.location === undefined ? {} : { location: input.location }),
       ...(input.title === undefined ? {} : { title: input.title }),
     };
     const [updated] = await this.db
@@ -683,8 +696,10 @@ export class DrizzleAnnouncementsRepository implements AnnouncementsRepository {
         category: classAnnouncements.category,
         classId: classAnnouncements.classId,
         createdAt: classAnnouncements.createdAt,
+        eventAt: classAnnouncements.eventAt,
         id: classAnnouncements.id,
         isPublished: classAnnouncements.isPublished,
+        location: classAnnouncements.location,
         publishedAt: classAnnouncements.publishedAt,
         schoolId: classAnnouncements.schoolId,
         subjectId: classAnnouncements.subjectId,
@@ -725,8 +740,10 @@ export class DrizzleAnnouncementsRepository implements AnnouncementsRepository {
       category: record.category,
       ...(record.classId === null ? {} : { classId: record.classId }),
       description: record.body,
+      eventAt: toIso(record.eventAt),
       id: record.id,
       ...(image === undefined ? {} : { imageObjectPath: image.objectPath }),
+      location: record.location,
       publishedAt: toIso(record.publishedAt),
       readTimeMinutes: minutesToRead(record.body),
       resources,
