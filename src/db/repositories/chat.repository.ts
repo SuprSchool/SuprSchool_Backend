@@ -63,6 +63,28 @@ function attachmentsFromRow(value: unknown): readonly StoredChatAttachment[] {
   }));
 }
 
+const ATTACHMENT_SESSION_UNIQUE = 'chat_message_attachments_upload_session_unique';
+
+/**
+ * One confirmed upload belongs to exactly one message, forever.
+ *
+ * A send whose response was lost leaves the file uploaded and the composer
+ * still holding it. Editing the text produces a new client message id, so the
+ * idempotency key no longer matches and the confirm — being idempotent —
+ * succeeds; only the attachment's unique index stops the second write. Left
+ * unmapped that is a 500 on every retry, under copy blaming the connection for
+ * a file that already arrived. A distinct answer lets the composer say so and
+ * release the attachment.
+ */
+function isAttachmentSessionConflict(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown; message?: unknown };
+  if (candidate.code !== '23505') return false;
+  return candidate.constraint_name === ATTACHMENT_SESSION_UNIQUE
+    || candidate.constraint === ATTACHMENT_SESSION_UNIQUE
+    || (typeof candidate.message === 'string' && candidate.message.includes(ATTACHMENT_SESSION_UNIQUE));
+}
+
 /** The attachment projection every message read shares. */
 const attachmentItemsJson = sql`
   select json_agg(
@@ -380,7 +402,7 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
     const attachment = input.attachment;
     // The attachment rides the same statement as its message, so the pair is
     // one commit: no message ever exists briefly without the file it announces.
-    const rows = await this.messageRows(sql<ChatMessageRow>`
+    const rows = await this.insertRows(sql<ChatMessageRow>`
       with inserted as (
         insert into public.chat_messages (school_id, room_id, sender_id, client_message_id, body)
         values (${access.schoolId}::uuid, ${access.id}::uuid, ${access.userId}::uuid, ${input.clientMessageId}::uuid, ${input.body})
@@ -468,6 +490,21 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
   private async messageRows(query: ReturnType<typeof sql<ChatMessageRow>>): Promise<ChatMessageRow[]> {
     const rows = await this.db.execute(query);
     return rows as unknown as ChatMessageRow[];
+  }
+
+  private async insertRows(query: ReturnType<typeof sql<ChatMessageRow>>): Promise<ChatMessageRow[]> {
+    try {
+      return await this.messageRows(query);
+    } catch (error) {
+      if (isAttachmentSessionConflict(error)) {
+        throw new AppError(
+          'ATTACHMENT_ALREADY_SENT',
+          409,
+          'This file has already been sent. Remove it and send your message again.',
+        );
+      }
+      throw error;
+    }
   }
 }
 

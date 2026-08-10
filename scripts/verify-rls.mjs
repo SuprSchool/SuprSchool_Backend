@@ -161,28 +161,44 @@ async function seed(sql) {
   await sql`insert into public.queue_dead_letters (queue_name, original_message_id, event_id, school_id, envelope, error_category, error_detail) values
     ('storage_cleanup', 1001, ${ids.eventA}, ${ids.schoolA}, '{"fixture":"a"}', 'verification', 'fixture'),
     ('storage_cleanup', 1002, ${ids.eventB}, ${ids.schoolB}, '{"fixture":"b"}', 'verification', 'fixture')`;
+  // `broadcast_chat_message_after_insert` resolves the sender through
+  // `user_roles` and RAISES when there is no active student or teacher role,
+  // so every chat message needs one before it can be inserted at all.
+  await sql`insert into public.user_roles (user_id, school_id, role, is_active) values
+    (${ids.userA}, ${ids.schoolA}, 'student', true),
+    (${ids.userA}, ${ids.schoolA}, 'teacher', true),
+    (${ids.userB}, ${ids.schoolB}, 'student', true),
+    (${ids.userB}, ${ids.schoolB}, 'teacher', true)
+    on conflict (user_id, school_id, role) do update set is_active = true`;
   // Class chat rooms are usually provisioned by trigger when the class lands;
   // claim a known id when they are not, then read back whichever row won.
   await sql`insert into public.chat_rooms (id, school_id, class_id, subject_id, kind) values
     (${ids.chatRoomA}, ${ids.schoolA}, ${ids.classA}, null, 'class'),
     (${ids.chatRoomB}, ${ids.schoolB}, ${ids.classB}, null, 'class')
     on conflict do nothing`;
-  await sql`insert into public.chat_messages (id, school_id, room_id, sender_id, client_message_id, body)
-    select ${ids.chatMessageA}, ${ids.schoolA}, room.id, ${ids.userA}, ${ids.chatClientA}, 'RLS A'
-    from public.chat_rooms room
-    where room.school_id = ${ids.schoolA} and room.class_id = ${ids.classA} and room.kind = 'class'
-    limit 1`;
-  await sql`insert into public.chat_messages (id, school_id, room_id, sender_id, client_message_id, body)
-    select ${ids.chatMessageB}, ${ids.schoolB}, room.id, ${ids.userB}, ${ids.chatClientB}, 'RLS B'
-    from public.chat_rooms room
-    where room.school_id = ${ids.schoolB} and room.class_id = ${ids.classB} and room.kind = 'class'
-    limit 1`;
   await sql`insert into public.upload_sessions (id, school_id, user_id, bucket, parent_type, parent_id, object_path, content_type, size_bytes, expires_at) values
     (${ids.chatSessionA}, ${ids.schoolA}, ${ids.userA}, 'academic-files', 'chat-attachment', 'rls-a', ${`${ids.schoolA}/chat-a.pdf`}, 'application/pdf', 1, now() + interval '10 minutes'),
     (${ids.chatSessionB}, ${ids.schoolB}, ${ids.userB}, 'academic-files', 'chat-attachment', 'rls-b', ${`${ids.schoolB}/chat-b.pdf`}, 'application/pdf', 1, now() + interval '10 minutes')`;
-  await sql`insert into public.chat_message_attachments (school_id, message_id, upload_session_id, object_path, display_name, content_type, bytes) values
-    (${ids.schoolA}, ${ids.chatMessageA}, ${ids.chatSessionA}, ${`${ids.schoolA}/chat-a.pdf`}, 'chat-a.pdf', 'application/pdf', 1),
-    (${ids.schoolB}, ${ids.chatMessageB}, ${ids.chatSessionB}, ${`${ids.schoolB}/chat-b.pdf`}, 'chat-b.pdf', 'application/pdf', 1)`;
+  // The message insert is conditional on a room existing, so the attachment
+  // takes its `message_id` from what the insert actually returned. Hardcoding
+  // it would turn a zero-row skip into an FK violation and mask the real cause.
+  for (const tenant of [
+    { client: ids.chatClientA, classId: ids.classA, message: ids.chatMessageA, objectPath: `${ids.schoolA}/chat-a.pdf`, name: 'chat-a.pdf', school: ids.schoolA, session: ids.chatSessionA, user: ids.userA },
+    { client: ids.chatClientB, classId: ids.classB, message: ids.chatMessageB, objectPath: `${ids.schoolB}/chat-b.pdf`, name: 'chat-b.pdf', school: ids.schoolB, session: ids.chatSessionB, user: ids.userB },
+  ]) {
+    const inserted = await sql`insert into public.chat_messages (id, school_id, room_id, sender_id, client_message_id, body)
+      select ${tenant.message}, ${tenant.school}, room.id, ${tenant.user}, ${tenant.client}, 'RLS chat'
+      from public.chat_rooms room
+      where room.school_id = ${tenant.school} and room.class_id = ${tenant.classId} and room.kind = 'class'
+      limit 1
+      returning id`;
+    const messageId = inserted[0]?.id;
+    if (messageId === undefined) {
+      throw new Error(`Chat seed found no class chat room for school ${tenant.school}; chat RLS cannot be verified.`);
+    }
+    await sql`insert into public.chat_message_attachments (school_id, message_id, upload_session_id, object_path, display_name, content_type, bytes) values
+      (${tenant.school}, ${messageId}, ${tenant.session}, ${tenant.objectPath}, ${tenant.name}, 'application/pdf', 1)`;
+  }
   await sql`insert into storage.objects (bucket_id, name, owner_id, metadata) values
     ('assignments', ${`${ids.schoolA}/rls-a.pdf`}, ${ids.userA}, '{"size":1,"mimetype":"application/pdf"}'),
     ('assignments', ${`${ids.schoolB}/rls-b.pdf`}, ${ids.userB}, '{"size":1,"mimetype":"application/pdf"}'),

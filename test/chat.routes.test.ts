@@ -115,6 +115,7 @@ function createRepository() {
   const messages: StoredChatMessage[] = [];
   const typingEvents: Array<{ expiresAt: string; isTyping: boolean; userId: string }> = [];
   const readCursors = new Map<string, StoredChatMessage>();
+  const usedSessionIds = new Set<string>();
   const access: Access = {
     classId: '00000000-0000-4000-8000-000000000301', id: roomId, kind: 'class', schoolId, senderRole: 'student', subjectId: null, userId: studentId,
   };
@@ -144,6 +145,14 @@ function createRepository() {
       const requestedAccess = room as Access;
       const duplicate = await repository.findMessageByClientId(requestedAccess, input.clientMessageId);
       if (duplicate) return duplicate;
+      // Mirrors `chat_message_attachments_upload_session_unique`: one confirmed
+      // upload belongs to exactly one message, forever.
+      if (input.attachment !== undefined) {
+        if (usedSessionIds.has(input.attachment.uploadSessionId)) {
+          throw new AppError('ATTACHMENT_ALREADY_SENT', 409, 'This file has already been sent');
+        }
+        usedSessionIds.add(input.attachment.uploadSessionId);
+      }
       count += 1;
       const message: StoredChatMessage = {
         attachments: input.attachment === undefined ? [] : [{
@@ -485,6 +494,53 @@ describe('chat REST API', () => {
       .expect(201);
 
     expect(files.uploadRequests).toEqual([{ displayName: 'notes.pdf', roomId }]);
+  });
+
+  // A lost response leaves the file uploaded and the composer still holding it.
+  // The user edits the text (a new client message id), resends, and the
+  // idempotent confirm succeeds — but the attachment row is already there.
+  // Without a distinct answer that is an uncaught 500 forever, under copy that
+  // blames the network for a file that in fact already arrived.
+  it('rejects re-sending an already-sent attachment session with 409', async () => {
+    const { app, messages } = createTestApp();
+    await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000194')
+      .send({ ...input('00000000-0000-4000-8000-000000000195', 'first try'), attachmentSessionId: confirmedSessionId })
+      .expect(201);
+
+    const resend = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000196')
+      .send({ ...input('00000000-0000-4000-8000-000000000197', 'edited text'), attachmentSessionId: confirmedSessionId })
+      .expect(409);
+
+    expect(resend.body.error.code).toBe('ATTACHMENT_ALREADY_SENT');
+    expect(messages).toHaveLength(1);
+  });
+
+  it('maps the attachment unique violation to a distinct client answer', async () => {
+    const uniqueViolation = Object.assign(new Error('duplicate key value violates unique constraint'), {
+      code: '23505',
+      constraint_name: 'chat_message_attachments_upload_session_unique',
+    });
+    const database = {
+      async execute() { throw uniqueViolation; },
+    } as unknown as Database;
+    const repository = new DrizzleChatRepository(database);
+
+    await expect(repository.insertMessage(
+      { classId: '00000000-0000-4000-8000-000000000301', id: roomId, kind: 'class', schoolId, subjectId: null, userId: studentId },
+      {
+        attachment: {
+          contentType: 'application/pdf',
+          displayName: 'notes.pdf',
+          objectPath: `${schoolId}/chat-attachment/${roomId}/${confirmedSessionId}`,
+          sizeBytes: 1024,
+          uploadSessionId: confirmedSessionId,
+        },
+        body: 'see attached',
+        clientMessageId: '00000000-0000-4000-8000-000000000198',
+      },
+    )).rejects.toMatchObject({ code: 'ATTACHMENT_ALREADY_SENT', status: 409 });
   });
 
   it('keeps one send path and one upload path rather than forking per role', () => {
