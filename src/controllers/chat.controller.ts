@@ -6,6 +6,7 @@ import {
   chatMessagesQuerySchema,
   chatRoomParamsSchema,
   chatTypingSchema,
+  createChatAttachmentUploadSchema,
   encodeChatCursor,
   idempotencyKeySchema,
   markChatReadSchema,
@@ -46,13 +47,29 @@ export function createChatController(service: ChatService) {
 
     sendMessage: async (request: Request, response: Response): Promise<void> => {
       const key = idempotencyKeySchema.parse(request.header('Idempotency-Key'));
+      const input = sendChatMessageSchema.parse(request.body);
       const message = await service.sendMessage(
         identity(request),
         roomId(request),
         key,
-        sendChatMessageSchema.parse(request.body),
+        {
+          body: input.body,
+          clientMessageId: input.clientMessageId,
+          ...(input.attachmentSessionId === undefined
+            ? {}
+            : { attachmentSessionId: input.attachmentSessionId }),
+        },
       );
       response.status(201).json(message);
+    },
+
+    createAttachmentUploadSession: async (request: Request, response: Response): Promise<void> => {
+      const session = await service.createAttachmentUploadSession(
+        identity(request),
+        roomId(request),
+        createChatAttachmentUploadSchema.parse(request.body),
+      );
+      response.status(201).json(session);
     },
 
     markRead: async (request: Request, response: Response): Promise<void> => {

@@ -5,19 +5,21 @@ import { AppError } from '../../lib/errors.js';
 import type {
   ChatCursorPage,
   ChatIdentity,
-  ChatMessageDto,
-  ChatMessagePage,
   ChatRoomAccess,
-  ChatRoomSummary,
   CreateChatMessageInput,
+  StoredChatAttachment,
+  StoredChatMessage,
+  StoredChatMessagePage,
+  StoredChatRoomSummary,
 } from '../../types/chat.js';
 
 export interface ChatRepository {
   assertAccess(identity: ChatIdentity, roomId: string): Promise<ChatRoomAccess>;
-  listRooms(identity: ChatIdentity): Promise<readonly ChatRoomSummary[]>;
-  listMessages(access: ChatRoomAccess, page: ChatCursorPage): Promise<ChatMessagePage>;
-  findMessageByClientId(access: ChatRoomAccess, clientMessageId: string): Promise<ChatMessageDto | undefined>;
-  insertMessage(access: ChatRoomAccess, input: CreateChatMessageInput): Promise<ChatMessageDto>;
+  canAccessRoom(identity: { schoolId: string; userId: string }, roomId: string): Promise<boolean>;
+  listRooms(identity: ChatIdentity): Promise<readonly StoredChatRoomSummary[]>;
+  listMessages(access: ChatRoomAccess, page: ChatCursorPage): Promise<StoredChatMessagePage>;
+  findMessageByClientId(access: ChatRoomAccess, clientMessageId: string): Promise<StoredChatMessage | undefined>;
+  insertMessage(access: ChatRoomAccess, input: CreateChatMessageInput): Promise<StoredChatMessage>;
   advanceReadCursor(access: ChatRoomAccess, messageId: string): Promise<void>;
 }
 
@@ -26,6 +28,7 @@ export interface ChatTypingPublisher {
 }
 
 interface ChatMessageRow {
+  attachments: unknown;
   body: string;
   clientMessageId: string;
   createdAt: string;
@@ -36,10 +39,49 @@ interface ChatMessageRow {
   senderRole: 'student' | 'teacher';
 }
 
+/**
+ * `json_agg` reaches this layer either already parsed or as text, depending on
+ * the driver's type handling. Normalise both, and treat anything else as the
+ * honest empty list rather than guessing at a shape.
+ */
+function attachmentsFromRow(value: unknown): readonly StoredChatAttachment[] {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((item: Record<string, unknown>) => ({
+    contentType: String(item.contentType),
+    id: String(item.id),
+    name: String(item.name),
+    objectPath: String(item.objectPath),
+    sizeBytes: Number(item.sizeBytes),
+  }));
+}
+
+/** The attachment projection every message read shares. */
+const attachmentItemsJson = sql`
+  select json_agg(
+    json_build_object(
+      'id', attachment.id,
+      'name', attachment.display_name,
+      'contentType', attachment.content_type,
+      'sizeBytes', attachment.bytes,
+      'objectPath', attachment.object_path
+    )
+    order by attachment.created_at, attachment.id
+  ) as items
+`;
+
 interface ChatRoomRow {
   classId: string;
   id: string;
   kind: 'class' | 'subject';
+  lastAttachments: unknown;
   lastBody: string | null;
   lastClientMessageId: string | null;
   lastCreatedAt: string | null;
@@ -111,7 +153,49 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
     return { ...room, userId: identity.userId };
   }
 
-  public async listRooms(identity: ChatIdentity): Promise<readonly ChatRoomSummary[]> {
+  /**
+   * Role-free reachability for the upload-session authorizer, which is handed
+   * a school and a user but no role. Mirrors `assertAccess`'s two membership
+   * shapes so an upload can never be attached to an unreachable room.
+   */
+  public async canAccessRoom(
+    identity: { schoolId: string; userId: string },
+    roomId: string,
+  ): Promise<boolean> {
+    const rows = await this.db.execute(sql<{ hasAccess: boolean }>`
+      select exists (
+        select 1
+        from public.class_members membership
+        join public.user_roles active_role
+          on active_role.user_id = membership.student_id
+         and active_role.school_id = membership.school_id
+         and active_role.role = 'student'
+         and active_role.is_active = true
+        where membership.school_id = room.school_id
+          and membership.class_id = room.class_id
+          and membership.student_id = ${identity.userId}::uuid
+          and membership.is_active = true
+      ) or exists (
+        select 1
+        from public.class_subjects assignment
+        join public.user_roles active_role
+          on active_role.user_id = assignment.teacher_id
+         and active_role.school_id = assignment.school_id
+         and active_role.role = 'teacher'
+         and active_role.is_active = true
+        where assignment.school_id = room.school_id
+          and assignment.class_id = room.class_id
+          and assignment.teacher_id = ${identity.userId}::uuid
+          and (room.kind = 'class' or assignment.subject_id = room.subject_id)
+      ) as "hasAccess"
+      from public.chat_rooms room
+      where room.id = ${roomId}::uuid and room.school_id = ${identity.schoolId}::uuid
+      limit 1
+    `);
+    return first<{ hasAccess: boolean }>(rows)?.hasAccess === true;
+  }
+
+  public async listRooms(identity: ChatIdentity): Promise<readonly StoredChatRoomSummary[]> {
     const rows = await this.db.execute(sql<ChatRoomRow>`
       select
         room.id,
@@ -126,6 +210,7 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
         latest.sender_id as "lastSenderId",
         latest.sender_display_name as "lastSenderDisplayName",
         latest.sender_role as "lastSenderRole",
+        latest.attachments as "lastAttachments",
         unread.count as "unreadCount"
       from public.chat_rooms room
       join public.classes class on class.id = room.class_id and class.school_id = room.school_id
@@ -142,7 +227,8 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
           message.created_at,
           message.sender_id,
           profile.display_name as sender_display_name,
-          sender_role.role as sender_role
+          sender_role.role as sender_role,
+          coalesce(attachments.items, '[]'::json) as attachments
         from public.chat_messages message
         join public.user_profiles profile on profile.id = message.sender_id and profile.school_id = message.school_id
         join public.user_roles sender_role
@@ -150,6 +236,11 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
          and sender_role.school_id = message.school_id
          and sender_role.is_active = true
          and sender_role.role in ('student', 'teacher')
+        left join lateral (
+          ${attachmentItemsJson}
+          from public.chat_message_attachments attachment
+          where attachment.school_id = message.school_id and attachment.message_id = message.id
+        ) attachments on true
         where message.school_id = room.school_id and message.room_id = room.id
         order by message.created_at desc, message.id desc
         limit 1
@@ -197,6 +288,7 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
       id: row.id,
       kind: row.kind,
       lastMessage: row.lastId === null ? null : messageFromRow({
+        attachments: row.lastAttachments,
         body: row.lastBody!, clientMessageId: row.lastClientMessageId!, createdAt: row.lastCreatedAt!, id: row.lastId,
         roomId: row.id, senderDisplayName: row.lastSenderDisplayName!, senderId: row.lastSenderId!, senderRole: row.lastSenderRole!,
       }),
@@ -206,7 +298,7 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
     }));
   }
 
-  public async listMessages(access: ChatRoomAccess, page: ChatCursorPage): Promise<ChatMessagePage> {
+  public async listMessages(access: ChatRoomAccess, page: ChatCursorPage): Promise<StoredChatMessagePage> {
     const isAfter = page.after !== undefined;
     const rows = await this.db.execute(sql<ChatMessageRow>`
       select * from (
@@ -219,12 +311,18 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
           message.sender_id as "senderId",
           profile.display_name as "senderDisplayName",
           sender_role.role as "senderRole",
+          coalesce(attachments.items, '[]'::json) as "attachments",
           message.created_at as raw_created_at
         from public.chat_messages message
         join public.user_profiles profile on profile.id = message.sender_id and profile.school_id = message.school_id
         join public.user_roles sender_role
           on sender_role.user_id = message.sender_id and sender_role.school_id = message.school_id
          and sender_role.is_active = true and sender_role.role in ('student', 'teacher')
+        left join lateral (
+          ${attachmentItemsJson}
+          from public.chat_message_attachments attachment
+          where attachment.school_id = message.school_id and attachment.message_id = message.id
+        ) attachments on true
         where message.school_id = ${access.schoolId}::uuid and message.room_id = ${access.id}::uuid
           and (${page.after?.createdAt ?? null}::timestamptz is null or (message.created_at, message.id) > (${page.after?.createdAt ?? null}::timestamptz, ${page.after?.id ?? null}::uuid))
           and (${page.before?.createdAt ?? null}::timestamptz is null or (message.created_at, message.id) < (${page.before?.createdAt ?? null}::timestamptz, ${page.before?.id ?? null}::uuid))
@@ -255,15 +353,21 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
     return { items, ...(hasMore && edge ? { nextCursor: { createdAt: edge.createdAt, id: edge.id } } : {}) };
   }
 
-  public async findMessageByClientId(access: ChatRoomAccess, clientMessageId: string): Promise<ChatMessageDto | undefined> {
+  public async findMessageByClientId(access: ChatRoomAccess, clientMessageId: string): Promise<StoredChatMessage | undefined> {
     const rows = await this.messageRows(sql<ChatMessageRow>`
       select message.id, message.room_id as "roomId", message.client_message_id as "clientMessageId", message.body,
         to_char(message.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt",
-        message.sender_id as "senderId", profile.display_name as "senderDisplayName", sender_role.role as "senderRole"
+        message.sender_id as "senderId", profile.display_name as "senderDisplayName", sender_role.role as "senderRole",
+        coalesce(attachments.items, '[]'::json) as "attachments"
       from public.chat_messages message
       join public.user_profiles profile on profile.id = message.sender_id and profile.school_id = message.school_id
       join public.user_roles sender_role on sender_role.user_id = message.sender_id and sender_role.school_id = message.school_id
         and sender_role.is_active = true and sender_role.role in ('student', 'teacher')
+      left join lateral (
+        ${attachmentItemsJson}
+        from public.chat_message_attachments attachment
+        where attachment.school_id = message.school_id and attachment.message_id = message.id
+      ) attachments on true
       where message.school_id = ${access.schoolId}::uuid and message.room_id = ${access.id}::uuid
         and message.sender_id = ${access.userId}::uuid and message.client_message_id = ${clientMessageId}::uuid
       order by sender_role.role
@@ -272,17 +376,48 @@ export class DrizzleChatRepository implements ChatRepository, ChatTypingPublishe
     return rows[0] ? messageFromRow(rows[0]) : undefined;
   }
 
-  public async insertMessage(access: ChatRoomAccess, input: CreateChatMessageInput): Promise<ChatMessageDto> {
+  public async insertMessage(access: ChatRoomAccess, input: CreateChatMessageInput): Promise<StoredChatMessage> {
+    const attachment = input.attachment;
+    // The attachment rides the same statement as its message, so the pair is
+    // one commit: no message ever exists briefly without the file it announces.
     const rows = await this.messageRows(sql<ChatMessageRow>`
       with inserted as (
         insert into public.chat_messages (school_id, room_id, sender_id, client_message_id, body)
         values (${access.schoolId}::uuid, ${access.id}::uuid, ${access.userId}::uuid, ${input.clientMessageId}::uuid, ${input.body})
         on conflict (school_id, room_id, sender_id, client_message_id) do nothing
         returning id, school_id, room_id, sender_id, client_message_id, body, created_at
+      ), attached as (
+        insert into public.chat_message_attachments (
+          school_id, message_id, upload_session_id, object_path, display_name, content_type, bytes
+        )
+        select
+          inserted.school_id,
+          inserted.id,
+          ${attachment?.uploadSessionId ?? null}::uuid,
+          ${attachment?.objectPath ?? null},
+          ${attachment?.displayName ?? null},
+          ${attachment?.contentType ?? null},
+          ${attachment?.sizeBytes ?? null}::bigint
+        from inserted
+        where ${attachment !== undefined}
+        returning id, display_name, content_type, bytes, object_path, created_at
       )
       select inserted.id, inserted.room_id as "roomId", inserted.client_message_id as "clientMessageId", inserted.body,
         to_char(inserted.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt",
-        inserted.sender_id as "senderId", profile.display_name as "senderDisplayName", sender_role.role as "senderRole"
+        inserted.sender_id as "senderId", profile.display_name as "senderDisplayName", sender_role.role as "senderRole",
+        coalesce((
+          select json_agg(
+            json_build_object(
+              'id', attached.id,
+              'name', attached.display_name,
+              'contentType', attached.content_type,
+              'sizeBytes', attached.bytes,
+              'objectPath', attached.object_path
+            )
+            order by attached.created_at, attached.id
+          )
+          from attached
+        ), '[]'::json) as "attachments"
       from inserted
       join public.user_profiles profile on profile.id = inserted.sender_id and profile.school_id = inserted.school_id
       join public.user_roles sender_role on sender_role.user_id = inserted.sender_id and sender_role.school_id = inserted.school_id
@@ -340,8 +475,9 @@ function first<T>(rows: unknown): T | undefined {
   return (rows as T[])[0];
 }
 
-function messageFromRow(row: ChatMessageRow): ChatMessageDto {
+function messageFromRow(row: ChatMessageRow): StoredChatMessage {
   return {
+    attachments: attachmentsFromRow(row.attachments),
     body: row.body,
     clientMessageId: row.clientMessageId,
     createdAt: row.createdAt,

@@ -38,6 +38,7 @@ function createDependencies(): AppDependencies {
     setPresetAvatar: vi.fn(),
   };
   const chatService: ChatService = {
+    createAttachmentUploadSession: vi.fn(),
     listMessages: vi.fn(),
     listRooms: vi.fn().mockResolvedValue([]),
     markRead: vi.fn(),

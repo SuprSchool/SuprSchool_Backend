@@ -11,8 +11,8 @@ import type { AuthenticationMiddleware } from '../src/middleware/authenticate.js
 import { IdempotencyStore, type IdempotencyRecord, type IdempotencyRecordStore, type IdempotencyRequest, type IdempotencyResponse } from '../src/platform/idempotency/idempotency-store.js';
 import type { CacheStore } from '../src/platform/cache/cache-store.js';
 import { createChatRouter } from '../src/routes/chat.routes.js';
-import { createChatService } from '../src/services/chat.service.js';
-import type { ChatHistoryCursor, ChatMessageDto, ChatMessagePage, ChatRoomAccess, ChatRoomSummary, CreateChatMessageInput } from '../src/types/chat.js';
+import { createChatService, type ChatAttachmentFilePort } from '../src/services/chat.service.js';
+import type { ChatHistoryCursor, ChatRoomAccess, SendChatMessageInput, StoredChatMessage, StoredChatMessagePage, StoredChatRoomSummary } from '../src/types/chat.js';
 
 const schoolId = '00000000-0000-4000-8000-000000000001';
 const studentId = '00000000-0000-4000-8000-000000000101';
@@ -21,6 +21,8 @@ const roomId = '00000000-0000-4000-8000-000000000201';
 const secondRoomId = '00000000-0000-4000-8000-000000000204';
 const forbiddenRoomId = '00000000-0000-4000-8000-000000000202';
 const foreignRoomId = '00000000-0000-4000-8000-000000000203';
+const confirmedSessionId = '00000000-0000-4000-8000-000000000801';
+const unconfirmedSessionId = '00000000-0000-4000-8000-000000000802';
 
 type Access = ChatRoomAccess & { userId: string };
 
@@ -72,10 +74,44 @@ function createCache(): CacheStore {
   };
 }
 
+function createFiles() {
+  const uploadRequests: Array<{ displayName: string; roomId: string }> = [];
+  const confirmations: string[] = [];
+  const port: ChatAttachmentFilePort = {
+    async confirmUpload(_identity, requestedRoom, uploadSessionId) {
+      confirmations.push(uploadSessionId);
+      // Mirrors the real service: a session whose object never landed in
+      // storage is ineligible, and the send is rejected before it commits.
+      if (uploadSessionId !== confirmedSessionId) {
+        throw new AppError('VALIDATION_ERROR', 400, 'Uploaded chat attachment does not match its approved session');
+      }
+      return {
+        contentType: 'application/pdf',
+        displayName: 'notes.pdf',
+        objectPath: `${schoolId}/chat-attachment/${requestedRoom}/${uploadSessionId}`,
+        sizeBytes: 1024,
+        uploadSessionId,
+      };
+    },
+    async createUpload(_identity, requestedRoom, input) {
+      uploadRequests.push({ displayName: input.displayName, roomId: requestedRoom });
+      return {
+        expiresAt: '2026-08-08T10:00:00.000Z',
+        id: confirmedSessionId,
+        signedUploadUrl: 'https://signed.example/upload',
+      };
+    },
+    async createReadUrl(objectPath) {
+      return `https://signed.example/read/${objectPath}`;
+    },
+  };
+  return { confirmations, port, uploadRequests };
+}
+
 function createRepository() {
-  const messages: ChatMessageDto[] = [];
+  const messages: StoredChatMessage[] = [];
   const typingEvents: Array<{ expiresAt: string; isTyping: boolean; userId: string }> = [];
-  const readCursors = new Map<string, ChatMessageDto>();
+  const readCursors = new Map<string, StoredChatMessage>();
   const access: Access = {
     classId: '00000000-0000-4000-8000-000000000301', id: roomId, kind: 'class', schoolId, subjectId: null, userId: studentId,
   };
@@ -87,6 +123,9 @@ function createRepository() {
       if (!message) throw new AppError('NOT_FOUND', 404, 'Chat message not found');
       const existing = readCursors.get(`${requestedAccess.id}:${requestedAccess.userId}`);
       if (!existing || compare(message, existing) > 0) readCursors.set(`${requestedAccess.id}:${requestedAccess.userId}`, message);
+    },
+    async canAccessRoom(_identity, requestedRoom) {
+      return requestedRoom === roomId || requestedRoom === secondRoomId;
     },
     async assertAccess(identity, requestedRoom) {
       if (requestedRoom === foreignRoomId) throw new AppError('NOT_FOUND', 404, 'Chat room not found');
@@ -103,7 +142,14 @@ function createRepository() {
       const duplicate = await repository.findMessageByClientId(requestedAccess, input.clientMessageId);
       if (duplicate) return duplicate;
       count += 1;
-      const message: ChatMessageDto = {
+      const message: StoredChatMessage = {
+        attachments: input.attachment === undefined ? [] : [{
+          contentType: input.attachment.contentType,
+          id: `00000000-0000-4000-8000-${String(700 + count).padStart(12, '0')}`,
+          name: input.attachment.displayName,
+          objectPath: input.attachment.objectPath,
+          sizeBytes: input.attachment.sizeBytes,
+        }],
         body: input.body,
         clientMessageId: input.clientMessageId,
         createdAt: `2026-07-13T10:00:${String(count).padStart(2, '0')}.000Z`,
@@ -120,13 +166,13 @@ function createRepository() {
       if (page.before) found = found.filter((item) => compare(item, page.before!) < 0);
       const items = page.before ? found.slice(-page.limit) : found.slice(0, page.limit);
       const edge = page.before ? items.at(0) : items.at(-1);
-      const pageResult: ChatMessagePage = { items };
+      const pageResult: StoredChatMessagePage = { items };
       if (found.length > items.length && edge) pageResult.nextCursor = { createdAt: edge.createdAt, id: edge.id };
       return pageResult;
     },
     async listRooms(identity) {
       if (identity.userId === outsiderId) return [];
-      const room: ChatRoomSummary = { classId: access.classId, id: access.id, kind: access.kind, lastMessage: null, name: 'Class chat', subjectId: null, unreadCount: 0 };
+      const room: StoredChatRoomSummary = { classId: access.classId, id: access.id, kind: access.kind, lastMessage: null, name: 'Class chat', subjectId: null, unreadCount: 0 };
       return [room];
     },
     async publishTyping(room, isTyping, expiresAt) {
@@ -136,22 +182,23 @@ function createRepository() {
   return { messages, readCursors, repository, typingEvents };
 }
 
-function createTestApp(cache: CacheStore = createCache()) {
+function createTestApp(cache: CacheStore = createCache(), role: 'student' | 'teacher' = 'student') {
   const fixture = createRepository();
+  const files = createFiles();
   const app = express();
   const authenticate: AuthenticationMiddleware = async (incoming: Request, _response: Response, next: NextFunction) => {
-    incoming.auth = { role: 'student', schoolId, userId: incoming.header('authorization') === 'Bearer outsider' ? outsiderId : studentId };
+    incoming.auth = { role, schoolId, userId: incoming.header('authorization') === 'Bearer outsider' ? outsiderId : studentId };
     next();
   };
   app.use(express.json());
   app.use('/v1/chat', createChatRouter(createChatService({
-    cache, idempotency: createIdempotency(), repository: fixture.repository, typingPublisher: fixture.repository,
+    cache, files: files.port, idempotency: createIdempotency(), repository: fixture.repository, typingPublisher: fixture.repository,
   }), authenticate));
   app.use(errorHandler);
-  return { app, ...fixture };
+  return { app, files, ...fixture };
 }
 
-function input(clientMessageId: string, body = 'Can you explain question 4?'): CreateChatMessageInput {
+function input(clientMessageId: string, body = 'Can you explain question 4?'): SendChatMessageInput {
   return { body, clientMessageId };
 }
 
@@ -172,6 +219,65 @@ describe('chat REST API', () => {
     expect(replay.body).toEqual(first.body);
     expect(first.body.body).toBe('Can you explain question 4?');
     expect(messages).toHaveLength(1);
+  });
+
+  it('sends a text-only message unchanged when no attachment session is supplied', async () => {
+    const { app, files, messages } = createTestApp();
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000180')
+      .send(input('00000000-0000-4000-8000-000000000181'))
+      .expect(201);
+
+    expect(response.body.body).toBe('Can you explain question 4?');
+    expect(response.body.attachments).toEqual([]);
+    expect(files.confirmations).toEqual([]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.attachments).toEqual([]);
+  });
+
+  it('commits a message with a confirmed attachment session and returns a signed url', async () => {
+    const { app, files, messages } = createTestApp();
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000182')
+      .send({ ...input('00000000-0000-4000-8000-000000000183', 'see attached'), attachmentSessionId: confirmedSessionId })
+      .expect(201);
+
+    expect(files.confirmations).toEqual([confirmedSessionId]);
+    expect(response.body.attachments).toEqual([{
+      contentType: 'application/pdf',
+      id: expect.any(String),
+      name: 'notes.pdf',
+      signedUrl: `https://signed.example/read/${schoolId}/chat-attachment/${roomId}/${confirmedSessionId}`,
+      sizeBytes: 1024,
+    }]);
+    expect(messages).toHaveLength(1);
+  });
+
+  it('rejects a message that references an unconfirmed attachment session with 400', async () => {
+    const { app, files, messages } = createTestApp();
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000184')
+      .send({ ...input('00000000-0000-4000-8000-000000000185'), attachmentSessionId: unconfirmedSessionId })
+      .expect(400);
+
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(files.confirmations).toEqual([unconfirmedSessionId]);
+    // Confirm-before-commit: nothing was written for a session that never landed.
+    expect(messages).toHaveLength(0);
+  });
+
+  it('issues an attachment upload session scoped to the requested room', async () => {
+    const { app, files } = createTestApp();
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/attachments/upload-sessions`)
+      .send({ contentType: 'application/pdf', displayName: 'notes.pdf', sizeBytes: 1024 })
+      .expect(201);
+
+    expect(response.body).toEqual({
+      expiresAt: '2026-08-08T10:00:00.000Z',
+      id: confirmedSessionId,
+      signedUploadUrl: 'https://signed.example/upload',
+    });
+    expect(files.uploadRequests).toEqual([{ displayName: 'notes.pdf', roomId }]);
   });
 
   it('persists a message when the optional rate-limit cache is temporarily unavailable', async () => {
@@ -336,7 +442,8 @@ describe('chat REST API', () => {
     let failClosedCalls = 0;
     let inserted = false;
     let quotaChecked = false;
-    const durableMessage: ChatMessageDto = {
+    const durableMessage: StoredChatMessage = {
+      attachments: [],
       body: 'Already durable',
       clientMessageId: '00000000-0000-4000-8000-000000000172',
       createdAt: '2026-07-13T10:00:01.000Z',
@@ -354,6 +461,7 @@ describe('chat REST API', () => {
           return work();
         },
       } as CacheStore,
+      files: {} as ChatAttachmentFilePort,
       idempotency: {
         claim: async () => ({ state: 'expired' as const }),
         complete: async (_request: IdempotencyRequest, response: IdempotencyResponse) => { completed = response; },
@@ -408,6 +516,7 @@ describe('chat REST API', () => {
           return work();
         },
       } as CacheStore,
+      files: {} as ChatAttachmentFilePort,
       idempotency: {
         claim: async () => ({ state: 'expired' as const }),
         failClosed: async () => { failClosedCalls += 1; },

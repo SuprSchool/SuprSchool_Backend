@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   check,
   index,
   pgEnum,
@@ -88,6 +89,46 @@ export const chatMessages = pgTable(
   ],
 );
 
+export const chatMessageAttachments = pgTable(
+  'chat_message_attachments',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    schoolId: uuid('school_id')
+      .notNull()
+      .references(() => schools.id, { onDelete: 'cascade' }),
+    messageId: uuid('message_id')
+      .notNull()
+      .references(() => chatMessages.id, { onDelete: 'cascade' }),
+    uploadSessionId: uuid('upload_session_id').notNull(),
+    objectPath: text('object_path').notNull(),
+    displayName: text('display_name').notNull(),
+    contentType: text('content_type').notNull(),
+    bytes: bigint('bytes', { mode: 'number' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    check(
+      'chat_message_attachments_display_name_length_check',
+      sql`char_length(${table.displayName}) between 1 and 255`,
+    ),
+    check(
+      'chat_message_attachments_content_type_length_check',
+      sql`char_length(${table.contentType}) between 1 and 255`,
+    ),
+    check('chat_message_attachments_bytes_check', sql`${table.bytes} > 0`),
+    uniqueIndex('chat_message_attachments_upload_session_unique').on(table.uploadSessionId),
+    uniqueIndex('chat_message_attachments_object_path_unique').on(table.objectPath),
+    index('chat_message_attachments_message_idx').on(
+      table.schoolId,
+      table.messageId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
 export const chatReadCursors = pgTable(
   'chat_read_cursors',
   {
@@ -123,6 +164,7 @@ export const chatReadCursors = pgTable(
 );
 
 export const chatSchema = {
+  chatMessageAttachments,
   chatMessages,
   chatReadCursors,
   chatRoomKind,

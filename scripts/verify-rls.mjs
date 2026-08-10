@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url';
 export const migrations = [
   '20260713010000', '20260713020000', '20260713030000', '20260713050000',
   '20260716010000', '20260716020000', '20260716030000', '20260716040000', '20260716050000', '20260716060000',
-  '20260716070000', '20260716105000', '20260722200000',
+  '20260716070000', '20260716105000', '20260722200000', '20260808060000',
 ];
 const ids = {
   schoolA: '10000000-0000-4000-8000-000000000001', schoolB: '10000000-0000-4000-8000-000000000002',
@@ -26,6 +26,10 @@ const ids = {
   submissionA: '56500000-0000-4000-8000-000000000001', submissionB: '56500000-0000-4000-8000-000000000002',
   resultA: '57000000-0000-4000-8000-000000000001', resultB: '57000000-0000-4000-8000-000000000002',
   outboxA: '58000000-0000-4000-8000-000000000001', outboxB: '58000000-0000-4000-8000-000000000002',
+  chatRoomA: '59000000-0000-4000-8000-000000000001', chatRoomB: '59000000-0000-4000-8000-000000000002',
+  chatMessageA: '59100000-0000-4000-8000-000000000001', chatMessageB: '59100000-0000-4000-8000-000000000002',
+  chatClientA: '59200000-0000-4000-8000-000000000001', chatClientB: '59200000-0000-4000-8000-000000000002',
+  chatSessionA: '59300000-0000-4000-8000-000000000001', chatSessionB: '59300000-0000-4000-8000-000000000002',
 };
 
 export function missingRequiredMigrations(applied) {
@@ -157,6 +161,28 @@ async function seed(sql) {
   await sql`insert into public.queue_dead_letters (queue_name, original_message_id, event_id, school_id, envelope, error_category, error_detail) values
     ('storage_cleanup', 1001, ${ids.eventA}, ${ids.schoolA}, '{"fixture":"a"}', 'verification', 'fixture'),
     ('storage_cleanup', 1002, ${ids.eventB}, ${ids.schoolB}, '{"fixture":"b"}', 'verification', 'fixture')`;
+  // Class chat rooms are usually provisioned by trigger when the class lands;
+  // claim a known id when they are not, then read back whichever row won.
+  await sql`insert into public.chat_rooms (id, school_id, class_id, subject_id, kind) values
+    (${ids.chatRoomA}, ${ids.schoolA}, ${ids.classA}, null, 'class'),
+    (${ids.chatRoomB}, ${ids.schoolB}, ${ids.classB}, null, 'class')
+    on conflict do nothing`;
+  await sql`insert into public.chat_messages (id, school_id, room_id, sender_id, client_message_id, body)
+    select ${ids.chatMessageA}, ${ids.schoolA}, room.id, ${ids.userA}, ${ids.chatClientA}, 'RLS A'
+    from public.chat_rooms room
+    where room.school_id = ${ids.schoolA} and room.class_id = ${ids.classA} and room.kind = 'class'
+    limit 1`;
+  await sql`insert into public.chat_messages (id, school_id, room_id, sender_id, client_message_id, body)
+    select ${ids.chatMessageB}, ${ids.schoolB}, room.id, ${ids.userB}, ${ids.chatClientB}, 'RLS B'
+    from public.chat_rooms room
+    where room.school_id = ${ids.schoolB} and room.class_id = ${ids.classB} and room.kind = 'class'
+    limit 1`;
+  await sql`insert into public.upload_sessions (id, school_id, user_id, bucket, parent_type, parent_id, object_path, content_type, size_bytes, expires_at) values
+    (${ids.chatSessionA}, ${ids.schoolA}, ${ids.userA}, 'academic-files', 'chat-attachment', 'rls-a', ${`${ids.schoolA}/chat-a.pdf`}, 'application/pdf', 1, now() + interval '10 minutes'),
+    (${ids.chatSessionB}, ${ids.schoolB}, ${ids.userB}, 'academic-files', 'chat-attachment', 'rls-b', ${`${ids.schoolB}/chat-b.pdf`}, 'application/pdf', 1, now() + interval '10 minutes')`;
+  await sql`insert into public.chat_message_attachments (school_id, message_id, upload_session_id, object_path, display_name, content_type, bytes) values
+    (${ids.schoolA}, ${ids.chatMessageA}, ${ids.chatSessionA}, ${`${ids.schoolA}/chat-a.pdf`}, 'chat-a.pdf', 'application/pdf', 1),
+    (${ids.schoolB}, ${ids.chatMessageB}, ${ids.chatSessionB}, ${`${ids.schoolB}/chat-b.pdf`}, 'chat-b.pdf', 'application/pdf', 1)`;
   await sql`insert into storage.objects (bucket_id, name, owner_id, metadata) values
     ('assignments', ${`${ids.schoolA}/rls-a.pdf`}, ${ids.userA}, '{"size":1,"mimetype":"application/pdf"}'),
     ('assignments', ${`${ids.schoolB}/rls-b.pdf`}, ${ids.userB}, '{"size":1,"mimetype":"application/pdf"}'),
@@ -203,6 +229,9 @@ async function run() {
           `select * from public.${table} where school_id = '${ids.schoolB}'`,
         ));
       }
+      await expectNoReadAccess(sql, 'cross-tenant chat message attachment read', () => sql.unsafe(
+        `select * from public.chat_message_attachments where school_id = '${ids.schoolB}'`,
+      ));
       await expectNoReadAccess(sql, 'cross-tenant assignment rubric read', () => sql.unsafe(
         `select rubric.* from public.assignment_rubrics rubric
          join public.assignments assignment on assignment.id = rubric.assignment_id

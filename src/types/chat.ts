@@ -15,6 +15,37 @@ export interface ChatMessageSender {
   role: ChatParticipantRole;
 }
 
+/**
+ * A durable attachment row as the repository stores it. `objectPath` never
+ * leaves the service layer — the service exchanges it for a short-lived signed
+ * URL before the message reaches a client.
+ */
+export interface StoredChatAttachment {
+  id: string;
+  name: string;
+  contentType: string;
+  sizeBytes: number;
+  objectPath: string;
+}
+
+export interface ChatMessageAttachment {
+  id: string;
+  name: string;
+  contentType: string;
+  sizeBytes: number;
+  signedUrl: string;
+}
+
+export interface StoredChatMessage {
+  id: string;
+  roomId: string;
+  clientMessageId: string;
+  sender: ChatMessageSender;
+  body: string;
+  createdAt: string;
+  attachments: readonly StoredChatAttachment[];
+}
+
 export interface ChatMessageDto {
   id: string;
   roomId: string;
@@ -22,16 +53,24 @@ export interface ChatMessageDto {
   sender: ChatMessageSender;
   body: string;
   createdAt: string;
+  attachments: readonly ChatMessageAttachment[];
 }
 
-export interface ChatRoomSummary {
+interface ChatRoomSummaryBase {
   id: string;
   classId: string;
   subjectId: string | null;
   kind: ChatRoomKind;
   name: string;
-  lastMessage: ChatMessageDto | null;
   unreadCount: number;
+}
+
+export interface StoredChatRoomSummary extends ChatRoomSummaryBase {
+  lastMessage: StoredChatMessage | null;
+}
+
+export interface ChatRoomSummary extends ChatRoomSummaryBase {
+  lastMessage: ChatMessageDto | null;
 }
 
 export interface ChatRoomAccess {
@@ -43,9 +82,41 @@ export interface ChatRoomAccess {
   userId: string;
 }
 
+/** What the wire accepts. `attachmentSessionId` names an upload session. */
+export interface SendChatMessageInput {
+  clientMessageId: string;
+  body: string;
+  attachmentSessionId?: string;
+}
+
+/**
+ * What the repository commits. The upload session is already confirmed by the
+ * time this exists, so a message can never reference an unconfirmed upload.
+ */
 export interface CreateChatMessageInput {
   clientMessageId: string;
   body: string;
+  attachment?: ConfirmedChatAttachment;
+}
+
+export interface CreateChatAttachmentUploadInput {
+  contentType: string;
+  displayName: string;
+  sizeBytes: number;
+}
+
+export interface ChatAttachmentUploadSession {
+  id: string;
+  signedUploadUrl: string;
+  expiresAt: string;
+}
+
+export interface ConfirmedChatAttachment {
+  uploadSessionId: string;
+  objectPath: string;
+  displayName: string;
+  contentType: string;
+  sizeBytes: number;
 }
 
 export interface ChatHistoryCursor {
@@ -57,6 +128,11 @@ export interface ChatCursorPage {
   before?: ChatHistoryCursor;
   after?: ChatHistoryCursor;
   limit: number;
+}
+
+export interface StoredChatMessagePage {
+  items: readonly StoredChatMessage[];
+  nextCursor?: ChatHistoryCursor;
 }
 
 export interface ChatMessagePage {
