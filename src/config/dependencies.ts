@@ -211,6 +211,7 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
     recordingsIdempotency: idempotency,
     recordingsService: createRecordingService({
       files: recordingFiles,
+      periods: schedule,
       repository: recordings,
       storage: platform.recordingStorage,
     }),

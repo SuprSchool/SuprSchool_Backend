@@ -28,7 +28,38 @@ interface StudentClassContext {
   schoolId: string;
 }
 
+/**
+ * Timetable slots are naive wall-clock times — `supabase/seed.sql` writes
+ * 08:00–11:45, a school morning — while the database session runs in UTC.
+ * Every other timetable read takes its date from the client, so the server has
+ * never had to name the school's zone; resolving a period server-side does.
+ * One school per deployment today; a `schools.time_zone` column is the real
+ * fix and is filed in `docs/parity/SHARED-REQUESTS.md`.
+ */
+export const TIMETABLE_TIME_ZONE = 'Asia/Kolkata';
+
+function ordinal(position: number): string {
+  const mod100 = position % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${position}th`;
+  switch (position % 10) {
+    case 1:
+      return `${position}st`;
+    case 2:
+      return `${position}nd`;
+    case 3:
+      return `${position}rd`;
+    default:
+      return `${position}th`;
+  }
+}
+
 export interface ScheduleRepository {
+  findClassPeriodLabel(
+    teacherId: string,
+    schoolId: string,
+    classId: string,
+    subjectId: string,
+  ): Promise<string | null>;
   findStudentTimetable(
     studentId: string,
     schoolId: string,
@@ -100,6 +131,68 @@ export function toPendingAttendanceSlots(
 
 export class DrizzleScheduleRepository implements ScheduleRepository {
   public constructor(private readonly db: Database) {}
+
+  /**
+   * "Which period was this subject scheduled in, right now?" — the slot
+   * covering the current wall clock **for this subject**, named by its position
+   * in the class's day. Null when no slot covers the moment, when the slot
+   * belongs to a different subject, when the teacher does not own that
+   * subject, or when the role is not live.
+   *
+   * The subject gate is deliberate. A teacher taking two subjects for one class
+   * is inside the timetable all period, so matching on teacher and time alone
+   * would stamp the Maths ordinal on an English recording. Recording a subject
+   * outside its own slot is therefore out-of-timetable, which is the null the
+   * design already renders as the date alone.
+   *
+   * **Known limitation.** The ordinal is the slot's position among that class's
+   * slots for the day, which equals the school's period number only when every
+   * period is a slot row. Free periods are not rows, so a class scheduled in
+   * school periods 2, 4 and 6 is labelled 1st, 2nd and 3rd. No schedule screen
+   * renders an ordinal, so nothing here can contradict them — but the diary
+   * does: `client/app/(teacher)/classes/new-diary.tsx` offers a hardcoded
+   * "1st…8th Period" list and stores the teacher's pick verbatim, so one lesson
+   * can carry two different period labels. A `class_schedule_slots.period_number`
+   * column feeding both is the fix, filed in `docs/parity/SHARED-REQUESTS.md`.
+   */
+  public async findClassPeriodLabel(
+    teacherId: string,
+    schoolId: string,
+    classId: string,
+    subjectId: string,
+  ): Promise<string | null> {
+    const rows = await this.db.execute(sql`
+      with local_now as (
+        select (now() at time zone ${TIMETABLE_TIME_ZONE}::text) as at
+      ), day_slots as (
+        select slot.subject_id, slot.start_time, slot.end_time,
+          row_number() over (order by slot.start_time, slot.id) as position
+        from public.class_schedule_slots slot
+        cross join local_now
+        where slot.school_id = ${schoolId}::uuid
+          and slot.class_id = ${classId}::uuid
+          and slot.day_of_week = extract(dow from local_now.at)::int
+      )
+      select day_slots.position
+      from day_slots
+      cross join local_now
+      join public.class_subjects cs on cs.school_id = ${schoolId}::uuid
+        and cs.class_id = ${classId}::uuid
+        and cs.subject_id = day_slots.subject_id
+        and cs.teacher_id = ${teacherId}::uuid
+      join public.user_roles role on role.user_id = ${teacherId}::uuid
+        and role.school_id = ${schoolId}::uuid
+        and role.role = 'teacher' and role.is_active
+      where day_slots.subject_id = ${subjectId}::uuid
+        and local_now.at::time >= day_slots.start_time
+        and local_now.at::time < day_slots.end_time
+      order by day_slots.position
+      limit 1
+    `) as readonly { position: number | string }[];
+
+    const position = rows[0]?.position;
+    return position === undefined ? null : `${ordinal(Number(position))} Period`;
+  }
 
   public async findStudentTimetable(
     studentId: string,

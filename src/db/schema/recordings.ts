@@ -23,6 +23,9 @@ export const classRecordings = pgTable(
     createdByTeacherId: uuid('created_by_teacher_id').notNull().references(() => userProfiles.id, { onDelete: 'restrict' }),
     title: text('title').notNull(),
     description: text('description'),
+    // Resolved once from the timetable when the draft is created. Null for rows
+    // predating the column and for recordings made outside any timetable slot.
+    period: text('period'),
     status: text('status').$type<'draft' | 'published' | 'deleted'>().notNull(),
     publishedAt: timestamp('published_at', { withTimezone: true }),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),

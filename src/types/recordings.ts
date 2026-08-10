@@ -25,6 +25,12 @@ export interface RecordingSummary {
   createdAt: string;
   durationMs: number | null;
   id: string;
+  /**
+   * Timetable period label resolved when the draft was created — "2nd Period".
+   * Null for rows created before the column and for recordings made outside
+   * any timetable slot; the client renders the date alone on null.
+   */
+  period: string | null;
   publishedAt: string | null;
   status: Exclude<RecordingStatus, 'deleted'>;
   subjectId: string;

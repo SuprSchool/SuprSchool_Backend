@@ -28,6 +28,14 @@ export interface EditableRecording {
   schoolId: string;
 }
 
+/**
+ * The stored draft, as opposed to the request body: `period` is resolved by the
+ * service from the timetable, never supplied by the caller.
+ */
+export interface StoreRecordingDraftInput extends CreateRecordingDraftInput {
+  period: string | null;
+}
+
 export interface RecordingUploadSessionRecord {
   expectedContentType: 'audio/mp4';
   expectedDurationMs: number;
@@ -92,7 +100,7 @@ export interface StoredRecordingResource extends RecordingResource {
 export interface RecordingRepository {
   confirmResourceUpload(identity: RecordingIdentity, input: ConfirmRecordingResourceInput): Promise<RecordingResource>;
   confirmUpload(identity: RecordingIdentity, input: ConfirmRecordingUploadInput): Promise<'confirmed' | 'already_confirmed'>;
-  createDraft(identity: RecordingIdentity, input: CreateRecordingDraftInput): Promise<RecordingSummary>;
+  createDraft(identity: RecordingIdentity, input: StoreRecordingDraftInput): Promise<RecordingSummary>;
   deleteRecording(identity: RecordingIdentity, recordingId: string): Promise<RecordingDeletionResult>;
   deleteResource(identity: RecordingIdentity, recordingId: string, resourceId: string): Promise<{ id: string } | undefined>;
   findEditableRecording(identity: RecordingIdentity, recordingId: string): Promise<EditableRecording | undefined>;
@@ -123,6 +131,7 @@ type SummaryRow = {
   createdAt: Date | string;
   durationMs: number | string | null;
   id: string;
+  period: string | null;
   publishedAt: Date | string | null;
   status: 'draft' | 'published';
   subjectId: string;
@@ -161,6 +170,7 @@ function toSummary(row: SummaryRow): RecordingSummary {
     createdAt: asIso(row.createdAt)!,
     durationMs: asNumber(row.durationMs),
     id: row.id,
+    period: row.period ?? null,
     publishedAt: asIso(row.publishedAt),
     status: row.status,
     subjectId: row.subjectId,
@@ -212,15 +222,15 @@ function nextTeacherPage(rows: readonly SummaryRow[], limit: number): RecordingL
 export class DrizzleRecordingsRepository implements RecordingRepository {
   public constructor(private readonly db: Database, private readonly createId: () => string = randomUUID) {}
 
-  public async createDraft(identity: RecordingIdentity, input: CreateRecordingDraftInput): Promise<RecordingSummary> {
+  public async createDraft(identity: RecordingIdentity, input: StoreRecordingDraftInput): Promise<RecordingSummary> {
     await this.assertActiveTeacher(identity);
     const rows = rowsOf<SummaryRow>(await this.db.execute(sql`
       insert into public.class_recordings (
-        id, school_id, class_id, subject_id, created_by_teacher_id, title, description, status
+        id, school_id, class_id, subject_id, created_by_teacher_id, title, description, period, status
       )
       select
         ${this.createId()}::uuid, c.school_id, c.id, cs.subject_id, ${identity.userId}::uuid,
-        ${input.title}, ${input.description ?? null}, 'draft'
+        ${input.title}, ${input.description ?? null}, ${input.period}, 'draft'
       from public.class_subjects cs
       join public.classes c on c.id = cs.class_id and c.school_id = cs.school_id
       join public.user_roles role on role.user_id = ${identity.userId}::uuid
@@ -230,7 +240,7 @@ export class DrizzleRecordingsRepository implements RecordingRepository {
         and cs.subject_id = ${input.subjectId}::uuid
         and cs.teacher_id = ${identity.userId}::uuid
       returning id, class_id as "classId", subject_id as "subjectId", title, status,
-        created_at as "createdAt", published_at as "publishedAt", null::bigint as "durationMs"
+        created_at as "createdAt", published_at as "publishedAt", period, null::bigint as "durationMs"
     `));
     const row = rows[0];
     if (!row) throw new AppError('FORBIDDEN', 403, 'You are not assigned to this class subject');
@@ -641,6 +651,7 @@ export class DrizzleRecordingsRepository implements RecordingRepository {
           )
         returning cr.id, cr.class_id as "classId", cr.subject_id as "subjectId", cr.title, cr.status,
           to_char(cr.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt", to_char(cr.published_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "publishedAt",
+          cr.period,
           (select duration_ms from public.recording_audio_assets where recording_id = cr.id)::bigint as "durationMs"
       `));
       const row = rows[0];
@@ -682,7 +693,7 @@ export class DrizzleRecordingsRepository implements RecordingRepository {
             and cs.school_id = cr.school_id and cs.teacher_id = ${identity.userId}::uuid
         )
       returning cr.id, cr.class_id as "classId", cr.subject_id as "subjectId", cr.title,
-        cr.status, cr.created_at as "createdAt", cr.published_at as "publishedAt",
+        cr.status, cr.created_at as "createdAt", cr.published_at as "publishedAt", cr.period,
         (select asset.duration_ms from public.recording_audio_assets asset
           where asset.recording_id = cr.id and asset.school_id = cr.school_id
             and asset.state = 'confirmed') as "durationMs"
@@ -793,7 +804,7 @@ export class DrizzleRecordingsRepository implements RecordingRepository {
     await this.assertActiveTeacher(identity);
     const rows = rowsOf<SummaryRow>(await this.db.execute(sql`
       select cr.id, cr.class_id as "classId", cr.subject_id as "subjectId", cr.title, cr.description, cr.status,
-        to_char(cr.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt", to_char(cr.published_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "publishedAt", asset.duration_ms as "durationMs",
+        to_char(cr.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt", to_char(cr.published_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "publishedAt", cr.period, asset.duration_ms as "durationMs",
         (select count(*)::int from public.recording_resources resource
           where resource.school_id = cr.school_id and resource.recording_id = cr.id) as "resourceCount"
       from public.class_recordings cr
@@ -816,7 +827,7 @@ export class DrizzleRecordingsRepository implements RecordingRepository {
   public async listStudentRecordings(identity: RecordingIdentity, input: ListRecordingsInput): Promise<RecordingListResponse> {
     const rows = rowsOf<SummaryRow>(await this.db.execute(sql`
       select cr.id, cr.class_id as "classId", cr.subject_id as "subjectId", cr.title, cr.status,
-        to_char(cr.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt", to_char(cr.published_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "publishedAt", asset.duration_ms as "durationMs"
+        to_char(cr.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt", to_char(cr.published_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "publishedAt", cr.period, asset.duration_ms as "durationMs"
       from public.class_recordings cr
       join public.recording_audio_assets asset on asset.recording_id = cr.id and asset.school_id = cr.school_id and asset.state = 'confirmed'
       join public.class_members member on member.class_id = cr.class_id and member.school_id = cr.school_id
@@ -846,7 +857,7 @@ export class DrizzleRecordingsRepository implements RecordingRepository {
     await this.assertActiveTeacher(identity);
     const rows = rowsOf<DetailRow>(await this.db.execute(sql`
       select cr.id, cr.class_id as "classId", cr.subject_id as "subjectId", cr.title, cr.status,
-        cr.created_at as "createdAt", cr.published_at as "publishedAt", cr.description,
+        cr.created_at as "createdAt", cr.published_at as "publishedAt", cr.description, cr.period,
         asset.duration_ms as "durationMs", asset.size_bytes as "sizeBytes"
       from public.class_recordings cr
       join public.class_subjects subject on subject.class_id = cr.class_id
@@ -1103,7 +1114,7 @@ export class DrizzleRecordingsRepository implements RecordingRepository {
   private studentRecordingSql(identity: RecordingIdentity, recordingId: string) {
     return sql`
       select cr.id, cr.class_id as "classId", cr.subject_id as "subjectId", cr.title, cr.status,
-        to_char(cr.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt", to_char(cr.published_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "publishedAt", cr.description,
+        to_char(cr.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt", to_char(cr.published_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "publishedAt", cr.description, cr.period,
         asset.duration_ms as "durationMs", asset.size_bytes as "sizeBytes"
       from public.class_recordings cr
       join public.recording_audio_assets asset on asset.recording_id = cr.id and asset.school_id = cr.school_id and asset.state = 'confirmed'
