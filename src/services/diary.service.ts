@@ -216,10 +216,15 @@ export function createDiaryService({
       // The same window the read model reports as `occurrenceLocked`: once the
       // occurrence date has passed the entry may still be corrected, but it may
       // no longer be moved to another date or period.
-      if (
-        isOccurrenceLocked(access.occurredOn, todayIsoDate())
-        && (input.occurredOn !== undefined || input.periodLabel !== undefined)
-      ) {
+      //
+      // This turns on whether the values actually differ, not on whether the
+      // fields were sent. A correction that echoes the stored date and period
+      // back unchanged is exactly what an edit form submits, and refusing it
+      // would make every past entry uneditable.
+      const movesDate = input.occurredOn !== undefined && input.occurredOn !== access.occurredOn;
+      const movesPeriod = input.periodLabel !== undefined
+        && input.periodLabel !== access.periodLabel;
+      if (isOccurrenceLocked(access.occurredOn, todayIsoDate()) && (movesDate || movesPeriod)) {
         throw new AppError(
           'CONFLICT',
           409,

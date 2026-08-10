@@ -580,6 +580,7 @@ describe('diary service', () => {
         repository: createRepository({
           findTeacherDiaryAccess: vi.fn().mockResolvedValue({
             occurredOn: '2026-08-07',
+            periodLabel: '1st Period',
             schoolId: 'school-1',
           }),
         }),
@@ -589,6 +590,72 @@ describe('diary service', () => {
         service.update('teacher-1', diaryId, { occurredOn: '2026-08-09' }, 'diary-update-2'),
       ).rejects.toMatchObject({ status: 409 });
       expect(claim).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('accepts a locked entry whose date and period are echoed back unchanged', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-09T06:00:00.000Z'));
+    try {
+      const committedDiary = { ...createCommittedDiary(), occurredOn: '2026-08-07' };
+      const update = vi.fn().mockResolvedValue(committedDiary);
+      const service = createDiaryApplicationService({
+        idempotency: {
+          claim: vi.fn().mockResolvedValue({ requestHash: 'hash', state: 'claimed' }),
+        } as unknown as IdempotencyStore,
+        outbox: { dispatchPending: vi.fn().mockResolvedValue(undefined) },
+        queue: {} as QueueClient,
+        repository: createRepository({
+          findTeacherDiaryAccess: vi.fn().mockResolvedValue({
+            occurredOn: '2026-08-07',
+            periodLabel: '1st Period',
+            schoolId: 'school-1',
+          }),
+          update,
+        }),
+      });
+
+      // What the edit form actually submits: every field, with the occurrence
+      // fields carrying the values already stored. Refusing this would make
+      // every past entry — the whole Past Entries tab — uneditable.
+      await expect(service.update('teacher-1', diaryId, {
+        description: 'Corrected the worked example',
+        occurredOn: '2026-08-07',
+        periodLabel: '1st Period',
+        title: 'Fractions',
+      }, 'diary-update-4')).resolves.toMatchObject({ occurrenceLocked: true });
+      expect(update).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses a locked entry whose period is moved even when the date is unchanged', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-09T06:00:00.000Z'));
+    try {
+      const update = vi.fn();
+      const service = createDiaryApplicationService({
+        idempotency: { claim: vi.fn() } as unknown as IdempotencyStore,
+        outbox: { dispatchPending: vi.fn().mockResolvedValue(undefined) },
+        queue: {} as QueueClient,
+        repository: createRepository({
+          findTeacherDiaryAccess: vi.fn().mockResolvedValue({
+            occurredOn: '2026-08-07',
+            periodLabel: '1st Period',
+            schoolId: 'school-1',
+          }),
+          update,
+        }),
+      });
+
+      await expect(service.update('teacher-1', diaryId, {
+        occurredOn: '2026-08-07',
+        periodLabel: '4th Period',
+      }, 'diary-update-5')).rejects.toMatchObject({ code: 'CONFLICT', status: 409 });
+      expect(update).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -608,6 +675,7 @@ describe('diary service', () => {
         repository: createRepository({
           findTeacherDiaryAccess: vi.fn().mockResolvedValue({
             occurredOn: '2026-08-07',
+            periodLabel: '1st Period',
             schoolId: 'school-1',
           }),
           update: vi.fn().mockResolvedValue(committedDiary),

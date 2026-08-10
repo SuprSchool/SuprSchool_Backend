@@ -27,6 +27,7 @@ interface TeacherClassAccess {
 
 interface TeacherDiaryAccess extends TeacherClassAccess {
   occurredOn: string;
+  periodLabel: string;
 }
 
 interface UncoveredPeriodRow {
@@ -277,6 +278,7 @@ export class DrizzleDiaryRepository implements DiaryRepository {
     const [access] = await this.db
       .select({
         occurredOn: classDiaryEntries.occurredOn,
+        periodLabel: classDiaryEntries.periodLabel,
         schoolId: classDiaryEntries.schoolId,
       })
       .from(classDiaryEntries)
