@@ -178,10 +178,12 @@ export function createAnnouncementsService({
       category: stored.category,
       ...(stored.classId === undefined ? {} : { classId: stored.classId }),
       description: stored.description,
+      eventAt: stored.eventAt,
       id: stored.id,
       ...(stored.imageObjectPath === undefined ? {} : {
         imageUri: await files.createReadUrl('academic-files', stored.imageObjectPath, 900),
       }),
+      location: stored.location,
       publishedAt: stored.publishedAt,
       readTimeMinutes: stored.readTimeMinutes,
       resources,

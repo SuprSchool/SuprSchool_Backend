@@ -60,8 +60,12 @@ export interface AnnouncementDetail {
   category: AnnouncementCategory;
   classId?: string | undefined;
   description: string;
+  /** Optional event instant, ISO 8601. Null when the announcement has no event. */
+  eventAt: string | null;
   id: string;
   imageUri?: string | undefined;
+  /** Optional venue. Null when the announcement has no location row. */
+  location: string | null;
   publishedAt: string | null;
   readTimeMinutes: number;
   resources: ReadonlyArray<AnnouncementResource>;
@@ -73,8 +77,12 @@ export interface TeacherAnnouncement {
   audienceType: AnnouncementAudienceType;
   classId?: string | undefined;
   description: string;
+  /** Optional event instant, ISO 8601. Null when the announcement has no event. */
+  eventAt: string | null;
   id: string;
   isOwn: boolean;
+  /** Optional venue. Null when the announcement has no location row. */
+  location: string | null;
   publishedAt: string | null;
   title: string;
   type: AnnouncementCategory;
@@ -91,6 +99,8 @@ export interface CreateAnnouncementInput {
   body: string;
   category: AnnouncementCategory;
   classId?: string | undefined;
+  eventAt?: string | undefined;
+  location?: string | undefined;
   subjectId?: string | undefined;
   title: string;
 }
@@ -100,6 +110,10 @@ export interface UpdateAnnouncementInput {
   body?: string | undefined;
   category?: AnnouncementCategory | undefined;
   classId?: string | undefined;
+  /** `undefined` leaves the column alone; `null` clears it. The validator does not
+   * yet accept `null` — the repository is null-safe ahead of that change. */
+  eventAt?: string | null | undefined;
+  location?: string | null | undefined;
   subjectId?: string | undefined;
   title?: string | undefined;
 }

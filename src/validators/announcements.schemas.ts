@@ -52,6 +52,8 @@ export const createAnnouncementSchema = z.object({
   body: trimmedText(1, 10_000),
   category: z.enum(announcementCategoryValues),
   classId: z.uuid().optional(),
+  eventAt: z.string().datetime({ offset: true }).optional(),
+  location: trimmedText(1, 200).optional(),
   subjectId: z.uuid().optional(),
   title: trimmedText(1, 160),
 }).superRefine((value, context) => {
@@ -69,6 +71,8 @@ export const updateAnnouncementSchema = z.object({
   body: trimmedText(1, 10_000).optional(),
   category: z.enum(announcementCategoryValues).optional(),
   classId: z.uuid().optional(),
+  eventAt: z.string().datetime({ offset: true }).optional(),
+  location: trimmedText(1, 200).optional(),
   subjectId: z.uuid().optional(),
   title: trimmedText(1, 160).optional(),
 }).superRefine((value, context) => {
