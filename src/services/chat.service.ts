@@ -11,26 +11,56 @@ import {
   type IdempotencyStore,
 } from '../platform/idempotency/idempotency-store.js';
 import type {
+  ChatAttachmentUploadSession,
   ChatCursorPage,
   ChatIdentity,
   ChatMessageDto,
   ChatMessagePage,
   ChatRoomSummary,
-  CreateChatMessageInput,
+  ConfirmedChatAttachment,
+  CreateChatAttachmentUploadInput,
+  SendChatMessageInput,
+  SignedChatAttachmentRead,
+  StoredChatMessage,
 } from '../types/chat.js';
 
 export type { ChatRepository } from '../db/repositories/chat.repository.js';
 
+/**
+ * The one upload path chat attachments use. Both composers — student
+ * `253:11089` and teacher `517:6941` — reach storage through this port, so
+ * there is a single place where a session is confirmed before it is committed.
+ */
+export interface ChatAttachmentFilePort {
+  createUpload(
+    identity: ChatIdentity,
+    roomId: string,
+    input: CreateChatAttachmentUploadInput,
+  ): Promise<ChatAttachmentUploadSession>;
+  confirmUpload(
+    identity: ChatIdentity,
+    roomId: string,
+    uploadSessionId: string,
+  ): Promise<ConfirmedChatAttachment>;
+  createReadUrl(objectPath: string): Promise<SignedChatAttachmentRead>;
+}
+
 export interface ChatService {
   listRooms(identity: ChatIdentity): Promise<readonly ChatRoomSummary[]>;
   listMessages(identity: ChatIdentity, roomId: string, page: ChatCursorPage): Promise<ChatMessagePage>;
-  sendMessage(identity: ChatIdentity, roomId: string, key: string, input: CreateChatMessageInput): Promise<ChatMessageDto>;
+  sendMessage(identity: ChatIdentity, roomId: string, key: string, input: SendChatMessageInput): Promise<ChatMessageDto>;
+  createAttachmentUploadSession(
+    identity: ChatIdentity,
+    roomId: string,
+    input: CreateChatAttachmentUploadInput,
+  ): Promise<ChatAttachmentUploadSession>;
   markRead(identity: ChatIdentity, roomId: string, lastReadMessageId: string): Promise<void>;
   publishTyping(identity: ChatIdentity, roomId: string, isTyping: boolean): Promise<void>;
 }
 
 export interface CreateChatServiceDependencies {
   cache: CacheStore;
+  files: ChatAttachmentFilePort;
   idempotency: IdempotencyStore;
   repository: ChatRepository;
   typingPublisher: ChatTypingPublisher;
@@ -41,10 +71,32 @@ const typingLimit = { maximum: 5, windowSeconds: 5 };
 
 export function createChatService({
   cache,
+  files,
   idempotency,
   repository,
   typingPublisher,
 }: CreateChatServiceDependencies): ChatService {
+  /**
+   * Object paths stay server-side; a client only ever sees a short-lived
+   * signed URL for an attachment it is already allowed to read.
+   */
+  async function toMessage(stored: StoredChatMessage): Promise<ChatMessageDto> {
+    return {
+      ...stored,
+      attachments: await Promise.all(stored.attachments.map(async (attachment) => {
+        const read = await files.createReadUrl(attachment.objectPath);
+        return {
+          contentType: attachment.contentType,
+          expiresAt: read.expiresAt,
+          id: attachment.id,
+          name: attachment.name,
+          signedUrl: read.signedUrl,
+          sizeBytes: attachment.sizeBytes,
+        };
+      })),
+    };
+  }
+
   let cacheFailureLogged = false;
   const onCacheUnavailable = (error: unknown): void => {
     if (cacheFailureLogged) return;
@@ -55,11 +107,28 @@ export function createChatService({
   };
 
   return {
-    listRooms: (identity) => repository.listRooms(identity),
+    async listRooms(identity) {
+      const rooms = await repository.listRooms(identity);
+      return Promise.all(rooms.map(async (room) => ({
+        ...room,
+        lastMessage: room.lastMessage === null ? null : await toMessage(room.lastMessage),
+      })));
+    },
 
     async listMessages(identity, roomId, page) {
       const access = await repository.assertAccess(identity, roomId);
-      return repository.listMessages(access, page);
+      const stored = await repository.listMessages(access, page);
+      return {
+        items: await Promise.all(stored.items.map(toMessage)),
+        ...(stored.nextCursor === undefined ? {} : { nextCursor: stored.nextCursor }),
+      };
+    },
+
+    async createAttachmentUploadSession(identity, roomId, input) {
+      // Access is asserted with the caller's role before storage is touched;
+      // the upload-session authorizer re-checks it role-free on confirm.
+      await repository.assertAccess(identity, roomId);
+      return files.createUpload(identity, roomId, input);
     },
 
     async sendMessage(identity, roomId, key, input) {
@@ -84,8 +153,9 @@ export function createChatService({
         throw new AppError('IDEMPOTENCY_IN_PROGRESS', 409, 'This message is still being processed');
       }
       if (claim.state === 'expired') {
-        const existing = await repository.findMessageByClientId(access, input.clientMessageId);
-        if (existing) {
+        const recovered = await repository.findMessageByClientId(access, input.clientMessageId);
+        if (recovered) {
+          const existing = await toMessage(recovered);
           await idempotency.complete(request, { body: existing, status: 201 });
           return existing;
         }
@@ -113,7 +183,27 @@ export function createChatService({
         throw error;
       }
       const existing = await repository.findMessageByClientId(access, input.clientMessageId);
-      const message = existing ?? await repository.insertMessage(access, input);
+      let stored = existing;
+      if (stored === undefined) {
+        // Confirm before commit. A rejected session releases the idempotency
+        // claim so the caller can correct the upload and retry with the same
+        // key, rather than being told the request is still in progress.
+        let attachment: ConfirmedChatAttachment | undefined;
+        if (input.attachmentSessionId !== undefined) {
+          try {
+            attachment = await files.confirmUpload(identity, roomId, input.attachmentSessionId);
+          } catch (error) {
+            await idempotency.release(request);
+            throw error;
+          }
+        }
+        stored = await repository.insertMessage(access, {
+          body: input.body,
+          clientMessageId: input.clientMessageId,
+          ...(attachment === undefined ? {} : { attachment }),
+        });
+      }
+      const message = await toMessage(stored);
       await idempotency.complete(request, { body: message, status: 201 });
       return message;
     },

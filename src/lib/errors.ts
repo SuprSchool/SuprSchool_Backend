@@ -1,4 +1,5 @@
 export type ErrorCode =
+  | 'ATTACHMENT_ALREADY_SENT'
   | 'CONFLICT'
   | 'FORBIDDEN'
   | 'IDEMPOTENCY_CONFLICT'

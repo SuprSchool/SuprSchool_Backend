@@ -62,6 +62,10 @@ import {
   AcademicUploadParentAuthorizer,
 } from "../platform/storage/academic-file-service.js";
 import {
+  ChatAttachmentFileService,
+  ChatAttachmentUploadParentAuthorizer,
+} from "../platform/storage/chat-attachment-file-service.js";
+import {
   RecordingResourceFileService,
   RecordingResourceUploadParentAuthorizer,
 } from "../platform/storage/recording-resource-file-service.js";
@@ -112,10 +116,12 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
         exams,
       }),
       new RecordingResourceUploadParentAuthorizer(recordings),
+      new ChatAttachmentUploadParentAuthorizer(chat),
       new AvatarUploadParentAuthorizer(),
     ]),
   });
   const files = new AcademicFileService(platform.storage);
+  const chatFiles = new ChatAttachmentFileService(platform.storage);
   const recordingFiles = new RecordingResourceFileService(platform.storage);
   const cache = new AcademicCache(platform.cache);
   const outbox = new AcademicOutbox(db);
@@ -161,6 +167,7 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
     }),
     chatService: createChatService({
       cache: platform.cache,
+      files: chatFiles,
       idempotency,
       repository: chat,
       typingPublisher: chat,

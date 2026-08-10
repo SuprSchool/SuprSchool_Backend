@@ -1,4 +1,5 @@
 import express from 'express';
+import { drizzle } from 'drizzle-orm/postgres-js';
 import type { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
@@ -11,8 +12,8 @@ import type { AuthenticationMiddleware } from '../src/middleware/authenticate.js
 import { IdempotencyStore, type IdempotencyRecord, type IdempotencyRecordStore, type IdempotencyRequest, type IdempotencyResponse } from '../src/platform/idempotency/idempotency-store.js';
 import type { CacheStore } from '../src/platform/cache/cache-store.js';
 import { createChatRouter } from '../src/routes/chat.routes.js';
-import { createChatService } from '../src/services/chat.service.js';
-import type { ChatHistoryCursor, ChatMessageDto, ChatMessagePage, ChatRoomAccess, ChatRoomSummary, CreateChatMessageInput } from '../src/types/chat.js';
+import { createChatService, type ChatAttachmentFilePort } from '../src/services/chat.service.js';
+import type { ChatHistoryCursor, ChatRoomAccess, SendChatMessageInput, StoredChatMessage, StoredChatMessagePage, StoredChatRoomSummary } from '../src/types/chat.js';
 
 const schoolId = '00000000-0000-4000-8000-000000000001';
 const studentId = '00000000-0000-4000-8000-000000000101';
@@ -21,8 +22,38 @@ const roomId = '00000000-0000-4000-8000-000000000201';
 const secondRoomId = '00000000-0000-4000-8000-000000000204';
 const forbiddenRoomId = '00000000-0000-4000-8000-000000000202';
 const foreignRoomId = '00000000-0000-4000-8000-000000000203';
+const confirmedSessionId = '00000000-0000-4000-8000-000000000801';
+const unconfirmedSessionId = '00000000-0000-4000-8000-000000000802';
 
-type Access = ChatRoomAccess & { userId: string };
+// Production reads the sender's role from `user_roles` when it projects a
+// message, so the fixture carries it on the access it hands back rather than
+// assuming every sender is a student.
+type Access = ChatRoomAccess & { userId: string; senderRole: 'student' | 'teacher' };
+
+/** The shape postgres-js raises for a unique violation. */
+function postgresUniqueViolation(constraintName: string): Error {
+  return Object.assign(
+    new Error(`duplicate key value violates unique constraint "${constraintName}"`),
+    { code: '23505', constraint_name: constraintName, name: 'PostgresError', severity: 'ERROR' },
+  );
+}
+
+/**
+ * A real drizzle instance over a driver that always fails, so the value the
+ * repository catches is genuinely `DrizzleQueryError` with the driver error on
+ * `.cause` — the wrapping production sees, and the reason a guard that reads
+ * only the top level silently never fires.
+ */
+function databaseRejectingWith(error: Error): Database {
+  const client = {
+    options: { parsers: {}, serializers: {} },
+    unsafe: () => {
+      const run = async (): Promise<never> => { throw error; };
+      return Object.assign(run(), { values: run });
+    },
+  };
+  return drizzle({ client: client as never }) as unknown as Database;
+}
 
 function cursor(createdAt: string, id: string): string {
   return Buffer.from(JSON.stringify({ createdAt, id })).toString('base64url');
@@ -72,12 +103,50 @@ function createCache(): CacheStore {
   };
 }
 
+function createFiles() {
+  const uploadRequests: Array<{ displayName: string; roomId: string }> = [];
+  const confirmations: string[] = [];
+  const port: ChatAttachmentFilePort = {
+    async confirmUpload(_identity, requestedRoom, uploadSessionId) {
+      confirmations.push(uploadSessionId);
+      // Mirrors the real service: a session whose object never landed in
+      // storage is ineligible, and the send is rejected before it commits.
+      if (uploadSessionId !== confirmedSessionId) {
+        throw new AppError('VALIDATION_ERROR', 400, 'Uploaded chat attachment does not match its approved session');
+      }
+      return {
+        contentType: 'application/pdf',
+        displayName: 'notes.pdf',
+        objectPath: `${schoolId}/chat-attachment/${requestedRoom}/${uploadSessionId}`,
+        sizeBytes: 1024,
+        uploadSessionId,
+      };
+    },
+    async createUpload(_identity, requestedRoom, input) {
+      uploadRequests.push({ displayName: input.displayName, roomId: requestedRoom });
+      return {
+        expiresAt: '2026-08-08T10:00:00.000Z',
+        id: confirmedSessionId,
+        signedUploadUrl: 'https://signed.example/upload',
+      };
+    },
+    async createReadUrl(objectPath) {
+      return {
+        expiresAt: '2026-08-08T10:15:00.000Z',
+        signedUrl: `https://signed.example/read/${objectPath}`,
+      };
+    },
+  };
+  return { confirmations, port, uploadRequests };
+}
+
 function createRepository() {
-  const messages: ChatMessageDto[] = [];
+  const messages: StoredChatMessage[] = [];
   const typingEvents: Array<{ expiresAt: string; isTyping: boolean; userId: string }> = [];
-  const readCursors = new Map<string, ChatMessageDto>();
+  const readCursors = new Map<string, StoredChatMessage>();
+  const usedSessionIds = new Set<string>();
   const access: Access = {
-    classId: '00000000-0000-4000-8000-000000000301', id: roomId, kind: 'class', schoolId, subjectId: null, userId: studentId,
+    classId: '00000000-0000-4000-8000-000000000301', id: roomId, kind: 'class', schoolId, senderRole: 'student', subjectId: null, userId: studentId,
   };
   let count = 0;
   const repository: ChatRepository & ChatTypingPublisher = {
@@ -88,11 +157,14 @@ function createRepository() {
       const existing = readCursors.get(`${requestedAccess.id}:${requestedAccess.userId}`);
       if (!existing || compare(message, existing) > 0) readCursors.set(`${requestedAccess.id}:${requestedAccess.userId}`, message);
     },
+    async canAccessRoom(_identity, requestedRoom) {
+      return requestedRoom === roomId || requestedRoom === secondRoomId;
+    },
     async assertAccess(identity, requestedRoom) {
       if (requestedRoom === foreignRoomId) throw new AppError('NOT_FOUND', 404, 'Chat room not found');
       if (requestedRoom === forbiddenRoomId || identity.userId === outsiderId) throw new AppError('FORBIDDEN', 403, 'Chat room access denied');
       if (requestedRoom !== roomId && requestedRoom !== secondRoomId) throw new AppError('NOT_FOUND', 404, 'Chat room not found');
-      return { ...access, id: requestedRoom, userId: identity.userId };
+      return { ...access, id: requestedRoom, senderRole: identity.role, userId: identity.userId };
     },
     async findMessageByClientId(room, clientMessageId) {
       const requestedAccess = room as Access;
@@ -102,14 +174,33 @@ function createRepository() {
       const requestedAccess = room as Access;
       const duplicate = await repository.findMessageByClientId(requestedAccess, input.clientMessageId);
       if (duplicate) return duplicate;
+      // Mirrors `chat_message_attachments_upload_session_unique`: one confirmed
+      // upload belongs to exactly one message, forever.
+      if (input.attachment !== undefined) {
+        if (usedSessionIds.has(input.attachment.uploadSessionId)) {
+          throw new AppError('ATTACHMENT_ALREADY_SENT', 409, 'This file has already been sent');
+        }
+        usedSessionIds.add(input.attachment.uploadSessionId);
+      }
       count += 1;
-      const message: ChatMessageDto = {
+      const message: StoredChatMessage = {
+        attachments: input.attachment === undefined ? [] : [{
+          contentType: input.attachment.contentType,
+          id: `00000000-0000-4000-8000-${String(700 + count).padStart(12, '0')}`,
+          name: input.attachment.displayName,
+          objectPath: input.attachment.objectPath,
+          sizeBytes: input.attachment.sizeBytes,
+        }],
         body: input.body,
         clientMessageId: input.clientMessageId,
         createdAt: `2026-07-13T10:00:${String(count).padStart(2, '0')}.000Z`,
         id: `00000000-0000-4000-8000-${String(500 + count).padStart(12, '0')}`,
         roomId: requestedAccess.id,
-        sender: { displayName: 'Asha Student', id: requestedAccess.userId, role: 'student' },
+        sender: {
+          displayName: requestedAccess.senderRole === 'teacher' ? 'Rekha Teacher' : 'Asha Student',
+          id: requestedAccess.userId,
+          role: requestedAccess.senderRole,
+        },
       };
       messages.push(message);
       return message;
@@ -120,13 +211,13 @@ function createRepository() {
       if (page.before) found = found.filter((item) => compare(item, page.before!) < 0);
       const items = page.before ? found.slice(-page.limit) : found.slice(0, page.limit);
       const edge = page.before ? items.at(0) : items.at(-1);
-      const pageResult: ChatMessagePage = { items };
+      const pageResult: StoredChatMessagePage = { items };
       if (found.length > items.length && edge) pageResult.nextCursor = { createdAt: edge.createdAt, id: edge.id };
       return pageResult;
     },
     async listRooms(identity) {
       if (identity.userId === outsiderId) return [];
-      const room: ChatRoomSummary = { classId: access.classId, id: access.id, kind: access.kind, lastMessage: null, name: 'Class chat', subjectId: null, unreadCount: 0 };
+      const room: StoredChatRoomSummary = { classId: access.classId, id: access.id, kind: access.kind, lastMessage: null, name: 'Class chat', subjectId: null, unreadCount: 0 };
       return [room];
     },
     async publishTyping(room, isTyping, expiresAt) {
@@ -136,22 +227,23 @@ function createRepository() {
   return { messages, readCursors, repository, typingEvents };
 }
 
-function createTestApp(cache: CacheStore = createCache()) {
+function createTestApp(cache: CacheStore = createCache(), role: 'student' | 'teacher' = 'student') {
   const fixture = createRepository();
+  const files = createFiles();
   const app = express();
   const authenticate: AuthenticationMiddleware = async (incoming: Request, _response: Response, next: NextFunction) => {
-    incoming.auth = { role: 'student', schoolId, userId: incoming.header('authorization') === 'Bearer outsider' ? outsiderId : studentId };
+    incoming.auth = { role, schoolId, userId: incoming.header('authorization') === 'Bearer outsider' ? outsiderId : studentId };
     next();
   };
   app.use(express.json());
   app.use('/v1/chat', createChatRouter(createChatService({
-    cache, idempotency: createIdempotency(), repository: fixture.repository, typingPublisher: fixture.repository,
+    cache, files: files.port, idempotency: createIdempotency(), repository: fixture.repository, typingPublisher: fixture.repository,
   }), authenticate));
   app.use(errorHandler);
-  return { app, ...fixture };
+  return { app, files, ...fixture };
 }
 
-function input(clientMessageId: string, body = 'Can you explain question 4?'): CreateChatMessageInput {
+function input(clientMessageId: string, body = 'Can you explain question 4?'): SendChatMessageInput {
   return { body, clientMessageId };
 }
 
@@ -172,6 +264,66 @@ describe('chat REST API', () => {
     expect(replay.body).toEqual(first.body);
     expect(first.body.body).toBe('Can you explain question 4?');
     expect(messages).toHaveLength(1);
+  });
+
+  it('sends a text-only message unchanged when no attachment session is supplied', async () => {
+    const { app, files, messages } = createTestApp();
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000180')
+      .send(input('00000000-0000-4000-8000-000000000181'))
+      .expect(201);
+
+    expect(response.body.body).toBe('Can you explain question 4?');
+    expect(response.body.attachments).toEqual([]);
+    expect(files.confirmations).toEqual([]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.attachments).toEqual([]);
+  });
+
+  it('commits a message with a confirmed attachment session and returns a signed url', async () => {
+    const { app, files, messages } = createTestApp();
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000182')
+      .send({ ...input('00000000-0000-4000-8000-000000000183', 'see attached'), attachmentSessionId: confirmedSessionId })
+      .expect(201);
+
+    expect(files.confirmations).toEqual([confirmedSessionId]);
+    expect(response.body.attachments).toEqual([{
+      contentType: 'application/pdf',
+      expiresAt: '2026-08-08T10:15:00.000Z',
+      id: expect.any(String),
+      name: 'notes.pdf',
+      signedUrl: `https://signed.example/read/${schoolId}/chat-attachment/${roomId}/${confirmedSessionId}`,
+      sizeBytes: 1024,
+    }]);
+    expect(messages).toHaveLength(1);
+  });
+
+  it('rejects a message that references an unconfirmed attachment session with 400', async () => {
+    const { app, files, messages } = createTestApp();
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000184')
+      .send({ ...input('00000000-0000-4000-8000-000000000185'), attachmentSessionId: unconfirmedSessionId })
+      .expect(400);
+
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(files.confirmations).toEqual([unconfirmedSessionId]);
+    // Confirm-before-commit: nothing was written for a session that never landed.
+    expect(messages).toHaveLength(0);
+  });
+
+  it('issues an attachment upload session scoped to the requested room', async () => {
+    const { app, files } = createTestApp();
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/attachments/upload-sessions`)
+      .send({ contentType: 'application/pdf', displayName: 'notes.pdf', sizeBytes: 1024 })
+      .expect(201);
+
+    expect(response.body).toEqual({
+      expiresAt: '2026-08-08T10:00:00.000Z',
+      id: confirmedSessionId,
+      signedUploadUrl: 'https://signed.example/upload',
+    });
+    expect(files.uploadRequests).toEqual([{ displayName: 'notes.pdf', roomId }]);
   });
 
   it('persists a message when the optional rate-limit cache is temporarily unavailable', async () => {
@@ -331,12 +483,126 @@ describe('chat REST API', () => {
     expect(JSON.stringify(queries[0])).toContain('HH24:MI:SS.US');
   });
 
+  // `517:6941` draws the same clip the my-class flow filed against `253:11089`
+  // and asks for one upload path for both. The teacher composer therefore has
+  // no route of its own: these exercise the shared send path as a teacher.
+  it('teacher send accepts a confirmed attachment session', async () => {
+    const { app, files, messages } = createTestApp(createCache(), 'teacher');
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000190')
+      .send({ ...input('00000000-0000-4000-8000-000000000191', 'see attached'), attachmentSessionId: confirmedSessionId })
+      .expect(201);
+
+    expect(response.body.sender.role).toBe('teacher');
+    expect(response.body.attachments).toHaveLength(1);
+    expect(response.body.attachments[0]).toEqual({
+      contentType: 'application/pdf',
+      expiresAt: '2026-08-08T10:15:00.000Z',
+      id: expect.any(String),
+      name: 'notes.pdf',
+      signedUrl: `https://signed.example/read/${schoolId}/chat-attachment/${roomId}/${confirmedSessionId}`,
+      sizeBytes: 1024,
+    });
+    expect(files.confirmations).toEqual([confirmedSessionId]);
+    expect(messages).toHaveLength(1);
+  });
+
+  it('teacher send rejects an unconfirmed session with 400', async () => {
+    const { app, messages } = createTestApp(createCache(), 'teacher');
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000192')
+      .send({ ...input('00000000-0000-4000-8000-000000000193'), attachmentSessionId: unconfirmedSessionId })
+      .expect(400);
+
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(messages).toHaveLength(0);
+  });
+
+  it('issues a teacher attachment upload session from the same route as the student one', async () => {
+    const { app, files } = createTestApp(createCache(), 'teacher');
+    await request(app).post(`/v1/chat/rooms/${roomId}/attachments/upload-sessions`)
+      .send({ contentType: 'application/pdf', displayName: 'notes.pdf', sizeBytes: 1024 })
+      .expect(201);
+
+    expect(files.uploadRequests).toEqual([{ displayName: 'notes.pdf', roomId }]);
+  });
+
+  // A lost response leaves the file uploaded and the composer still holding it.
+  // The user edits the text (a new client message id), resends, and the
+  // idempotent confirm succeeds — but the attachment row is already there.
+  // Without a distinct answer that is an uncaught 500 forever, under copy that
+  // blames the network for a file that in fact already arrived.
+  it('rejects re-sending an already-sent attachment session with 409', async () => {
+    const { app, messages } = createTestApp();
+    await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000194')
+      .send({ ...input('00000000-0000-4000-8000-000000000195', 'first try'), attachmentSessionId: confirmedSessionId })
+      .expect(201);
+
+    const resend = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000196')
+      .send({ ...input('00000000-0000-4000-8000-000000000197', 'edited text'), attachmentSessionId: confirmedSessionId })
+      .expect(409);
+
+    expect(resend.body.error.code).toBe('ATTACHMENT_ALREADY_SENT');
+    expect(messages).toHaveLength(1);
+  });
+
+  // Driven through a real drizzle instance so the thrown value has the shape
+  // production actually sees: drizzle rethrows every failure as
+  // DrizzleQueryError with the driver error on `.cause`. A hand-built error
+  // would pass a guard that reads only the top level, which is what shipped.
+  it.each([
+    'chat_message_attachments_upload_session_unique',
+    'chat_message_attachments_object_path_unique',
+  ])('maps a %s violation raised through drizzle to a distinct client answer', async (constraintName) => {
+    const repository = new DrizzleChatRepository(
+      databaseRejectingWith(postgresUniqueViolation(constraintName)),
+    );
+
+    await expect(repository.insertMessage(
+      { classId: '00000000-0000-4000-8000-000000000301', id: roomId, kind: 'class', schoolId, subjectId: null, userId: studentId },
+      {
+        attachment: {
+          contentType: 'application/pdf',
+          displayName: 'notes.pdf',
+          objectPath: `${schoolId}/chat-attachment/${roomId}/${confirmedSessionId}`,
+          sizeBytes: 1024,
+          uploadSessionId: confirmedSessionId,
+        },
+        body: 'see attached',
+        clientMessageId: '00000000-0000-4000-8000-000000000198',
+      },
+    )).rejects.toMatchObject({ code: 'ATTACHMENT_ALREADY_SENT', status: 409 });
+  });
+
+  it('keeps one send path and one upload path rather than forking per role', () => {
+    const router = createChatRouter({} as never, (async () => undefined) as never);
+    const routes = (router as unknown as {
+      stack: Array<{ route?: { methods: Record<string, boolean>; path: string } }>;
+    }).stack
+      .flatMap((layer) => (layer.route
+        ? Object.keys(layer.route.methods).map((method) => `${method.toUpperCase()} ${layer.route!.path}`)
+        : []))
+      .sort();
+
+    expect(routes).toEqual([
+      'GET /rooms',
+      'GET /rooms/:roomId/messages',
+      'POST /rooms/:roomId/attachments/upload-sessions',
+      'POST /rooms/:roomId/messages',
+      'POST /rooms/:roomId/read',
+      'POST /rooms/:roomId/typing',
+    ]);
+  });
+
   it('recovers a durable message after an expired idempotency lease without charging quota or inserting', async () => {
     let completed: unknown;
     let failClosedCalls = 0;
     let inserted = false;
     let quotaChecked = false;
-    const durableMessage: ChatMessageDto = {
+    const durableMessage: StoredChatMessage = {
+      attachments: [],
       body: 'Already durable',
       clientMessageId: '00000000-0000-4000-8000-000000000172',
       createdAt: '2026-07-13T10:00:01.000Z',
@@ -354,6 +620,7 @@ describe('chat REST API', () => {
           return work();
         },
       } as CacheStore,
+      files: {} as ChatAttachmentFilePort,
       idempotency: {
         claim: async () => ({ state: 'expired' as const }),
         complete: async (_request: IdempotencyRequest, response: IdempotencyResponse) => { completed = response; },
@@ -408,6 +675,7 @@ describe('chat REST API', () => {
           return work();
         },
       } as CacheStore,
+      files: {} as ChatAttachmentFilePort,
       idempotency: {
         claim: async () => ({ state: 'expired' as const }),
         failClosed: async () => { failClosedCalls += 1; },

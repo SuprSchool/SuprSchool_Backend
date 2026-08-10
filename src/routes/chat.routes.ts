@@ -10,6 +10,12 @@ export function createChatRouter(service: ChatService, authenticate: Authenticat
   router.get('/rooms', authenticate, controller.listRooms);
   router.get('/rooms/:roomId/messages', authenticate, controller.listMessages);
   router.post('/rooms/:roomId/messages', authenticate, controller.sendMessage);
+  // One upload path, shared by the student and teacher composers.
+  router.post(
+    '/rooms/:roomId/attachments/upload-sessions',
+    authenticate,
+    controller.createAttachmentUploadSession,
+  );
   router.post('/rooms/:roomId/read', authenticate, controller.markRead);
   router.post('/rooms/:roomId/typing', authenticate, controller.publishTyping);
   return router;

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { academicFileContentTypes } from '../platform/storage/academic-file-content-types.js';
 import type { ChatHistoryCursor } from '../types/chat.js';
 
 const cursorPayloadSchema = z.object({
@@ -34,8 +35,15 @@ export const chatMessagesQuerySchema = z.object({
 });
 
 export const sendChatMessageSchema = z.object({
+  attachmentSessionId: z.uuid().optional(),
   body: z.string().trim().min(1).max(2000),
   clientMessageId: z.uuid(),
+}).strict();
+
+export const createChatAttachmentUploadSchema = z.object({
+  contentType: z.enum(academicFileContentTypes),
+  displayName: z.string().trim().min(1).max(255),
+  sizeBytes: z.number().int().positive().max(20 * 1024 * 1024),
 }).strict();
 
 export const markChatReadSchema = z.object({ lastReadMessageId: z.uuid() }).strict();
@@ -50,3 +58,4 @@ export function encodeChatCursor(cursor: ChatHistoryCursor): string {
 
 export type ChatMessagesQuery = z.infer<typeof chatMessagesQuerySchema>;
 export type SendChatMessage = z.infer<typeof sendChatMessageSchema>;
+export type CreateChatAttachmentUpload = z.infer<typeof createChatAttachmentUploadSchema>;
