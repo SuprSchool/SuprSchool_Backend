@@ -47,6 +47,13 @@ export interface AssignmentResource {
 }
 
 export interface AssignmentDetail {
+  /**
+   * The instant the assignment was created (`assignments.created_at`), to the
+   * millisecond. Frames 253:9834 / 253:9952 pair the assigned date with a
+   * relative age ("2m ago"), which a day-granularity display string cannot
+   * produce — so the stored timestamp rides the read model beside the date.
+   */
+  assignedAt: string;
   classId: string;
   /**
    * Human-readable code (ASG-<year>-<seq>), unique per school per year, printed
@@ -67,6 +74,8 @@ export interface AssignmentDetail {
 }
 
 export interface StudentAssignmentItem {
+  /** See `AssignmentDetail.assignedAt` — the stored creation instant, not the due date. */
+  assignedAt: string;
   dueAt: string;
   gradedAt?: string | undefined;
   gradingType: AssignmentGradingType;

@@ -238,7 +238,12 @@ function studentAssignmentListCacheKey(
 interface CachedStudentAssignmentPage {
   audienceClassIds: ReadonlyArray<string>;
   page: CursorPage<StudentAssignmentItem>;
-  version: 1;
+  /**
+   * Bumped to 2 when `assignedAt` joined `StudentAssignmentItem`. Entries
+   * written by the previous shape are rejected rather than served without a
+   * field the contract declares as always present.
+   */
+  version: 2;
 }
 
 function parseCachedJson<T>(value: string): T | undefined {
@@ -254,7 +259,7 @@ function readCachedStudentAssignmentPage(
     if (typeof parsed !== 'object' || parsed === null) return undefined;
     const cached = parsed as Partial<CachedStudentAssignmentPage>;
     if (
-      cached.version !== 1
+      cached.version !== 2
       || !Array.isArray(cached.audienceClassIds)
       || !cached.audienceClassIds.every((classId) => typeof classId === 'string')
       || typeof cached.page !== 'object'
@@ -307,6 +312,7 @@ export function createAssignmentsService({
 
   async function toDetail(stored: StoredAssignmentDetail): Promise<AssignmentDetail> {
     return {
+      assignedAt: stored.assignedAt,
       classId: stored.classId,
       displayCode: stored.displayCode,
       dueAt: stored.dueAt,
@@ -376,7 +382,7 @@ export function createAssignmentsService({
       const page = await repository.listForStudent(identity, query, clock());
       // Do not resurrect an invalidated cache namespace if a mutation committed during this read.
       if (await cacheGet(versionKey) === version) {
-        const value: CachedStudentAssignmentPage = { audienceClassIds, page, version: 1 };
+        const value: CachedStudentAssignmentPage = { audienceClassIds, page, version: 2 };
         await cacheSet(key, JSON.stringify(value), STUDENT_ASSIGNMENT_CACHE_TTL_SECONDS);
       }
       return page;
@@ -388,7 +394,12 @@ export function createAssignmentsService({
       const key = tenantCacheKey(identity.schoolId, "assignments", "detail", assignmentId);
       const cached = await cacheGet(key);
       const cachedDetail = cached === null ? undefined : parseCachedJson<AssignmentDetail>(cached);
-      if (cachedDetail !== undefined) return cachedDetail;
+      // An entry written before `assignedAt` existed is a miss, not a hit: the
+      // field is declared always-present, so serving it absent would break the
+      // contract for the 30 seconds such an entry can survive a deploy.
+      if (cachedDetail !== undefined && typeof cachedDetail.assignedAt === 'string') {
+        return cachedDetail;
+      }
       const detail = await toDetail(assignment);
       await cacheSet(key, JSON.stringify(detail), 30);
       return detail;

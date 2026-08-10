@@ -218,6 +218,7 @@ describe('assignment review regressions', () => {
   it('returns the authoritative subject name with each student assignment list item', async () => {
     const callback: RemoteCallback = async () => ({
       rows: [[
+        new Date('2026-07-01T08:00:00.000Z'), // assignedAt (assignments.created_at)
         new Date('2026-07-20T12:00:00.000Z'),
         null,
         'Numeric',
@@ -800,6 +801,7 @@ describe('assignment display codes and due timestamps', () => {
   it('returns the human-readable display code on the created-assignment response', async () => {
     const service = createService();
     vi.mocked(service.create).mockResolvedValue({
+      assignedAt: '2026-07-01T08:00:00.000Z',
       classId: classRouteId,
       displayCode: `${displayCodePrefix}001`,
       dueAt: validAssignment.dueAt,
@@ -1065,5 +1067,178 @@ describe('assignment display codes and due timestamps', () => {
     );
 
     expect(page.items[0]?.dueAt).toBe('2026-04-05T22:00:00.000Z');
+  });
+});
+
+/**
+ * Frames 253:9834 / 253:9952 pair the assigned date with a relative age ("2m ago").
+ * A day-granularity display string cannot produce that, so the stored creation
+ * instant rides the student read models as `assignedAt`.
+ */
+describe('student assignment assignedAt timestamps', () => {
+  const assignedAt = '2026-08-10T04:58:00.000Z';
+  const dueAt = '2026-08-20T12:00:00.000Z';
+
+  it('returns assignedAt as a real timestamp on the student assignment list', async () => {
+    const service = createService();
+    vi.mocked(service.listForStudent).mockResolvedValue({
+      items: [{
+        assignedAt,
+        dueAt,
+        gradingType: 'Numeric',
+        id: assignmentRouteId,
+        isGradedAssignment: true,
+        subjectId: validAssignment.subjectId,
+        subjectName: 'Mathematics',
+        title: validAssignment.title,
+      }],
+      nextCursor: undefined,
+    });
+    const studentApp = createTestApp(service, { role: 'student', userId: studentId });
+
+    const response = await request(studentApp).get('/student/assignments').expect(200);
+
+    expect(response.body.items[0].assignedAt).toBe(assignedAt);
+    // The display date stays exactly as it was; assignedAt sits beside it.
+    expect(response.body.items[0].dueAt).toBe(dueAt);
+  });
+
+  it('returns assignedAt on the student assignment detail response', async () => {
+    const service = createService();
+    vi.mocked(service.getForStudent).mockResolvedValue({
+      assignedAt,
+      classId: classRouteId,
+      displayCode: `ASG-${new Date().getUTCFullYear()}-004`,
+      dueAt,
+      gradingType: 'Numeric',
+      id: assignmentRouteId,
+      instructions: validAssignment.instructions,
+      isGradedAssignment: true,
+      maxMarks: 10,
+      resources: [],
+      rubrics: [],
+      subjectId: validAssignment.subjectId,
+      title: validAssignment.title,
+    });
+    const studentApp = createTestApp(service, { role: 'student', userId: studentId });
+
+    const response = await request(studentApp)
+      .get('/student/assignments/' + assignmentRouteId)
+      .expect(200);
+
+    expect(response.body.assignedAt).toBe(assignedAt);
+  });
+
+  it('maps the stored creation instant onto student list items, not the due date', async () => {
+    const callback: RemoteCallback = async () => ({
+      rows: [[
+        new Date(assignedAt),          // assignedAt (assignments.created_at)
+        new Date(dueAt),               // dueAt
+        null,                          // gradedAt
+        'Numeric',                     // gradingType
+        assignmentRouteId,             // id
+        true,                          // isGraded
+        null,                          // marks
+        schoolId,                      // schoolId
+        validAssignment.subjectId,     // subjectId
+        'Mathematics',                 // subjectName
+        null,                          // submittedAt
+        validAssignment.title,         // title
+      ]],
+    });
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const page = await repository.listForStudent(
+      { schoolId, userId: studentId },
+      { limit: 20 },
+      new Date('2026-08-01T00:00:00.000Z'),
+    );
+
+    expect(page.items[0]?.assignedAt).toBe(assignedAt);
+    // The whole point of the field: it is the creation instant, never the due date.
+    // The client previously fell back to dueAt and dated assignments wrongly.
+    expect(page.items[0]?.assignedAt).not.toBe(page.items[0]?.dueAt);
+  });
+
+  it('carries minute-level precision, so an age finer than a day is derivable', async () => {
+    const callback: RemoteCallback = async () => ({
+      rows: [[
+        new Date('2026-08-10T04:58:30.000Z'),
+        new Date(dueAt), null, 'Numeric', assignmentRouteId, true, null,
+        schoolId, validAssignment.subjectId, 'Mathematics', null, validAssignment.title,
+      ]],
+    });
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const page = await repository.listForStudent(
+      { schoolId, userId: studentId },
+      { limit: 20 },
+      new Date('2026-08-01T00:00:00.000Z'),
+    );
+
+    // A date-only string would have discarded the clock; "2m ago" needs it.
+    expect(page.items[0]?.assignedAt).toBe('2026-08-10T04:58:30.000Z');
+  });
+
+  it('reads the stored creation instant back onto the student detail read model', async () => {
+    const callback: RemoteCallback = async (query) => {
+      if (query.includes('assignment_rubrics') || query.includes('assignment_resources')) {
+        return { rows: [] };
+      }
+      return {
+        rows: [[
+          classRouteId,                                  // classId
+          new Date(assignedAt),                          // createdAt
+          null,                                          // deletedAt
+          `ASG-${new Date().getUTCFullYear()}-007`,      // displayCode
+          new Date(dueAt),                               // dueAt
+          'Numeric',                                     // gradingType
+          assignmentRouteId,                             // id
+          validAssignment.instructions,                  // instructions
+          true,                                          // isGraded
+          10,                                            // maxMarks
+          schoolId,                                      // schoolId
+          validAssignment.subjectId,                     // subjectId
+          teacherId,                                     // teacherId
+          validAssignment.title,                         // title
+          new Date(assignedAt),                          // updatedAt
+        ]],
+      };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const detail = await repository.findForStudent(
+      { schoolId, userId: studentId },
+      assignmentRouteId,
+    );
+
+    expect(detail?.assignedAt).toBe(assignedAt);
+    expect(detail?.dueAt).toBe(dueAt);
+  });
+
+  it('keeps the student list query school-scoped while selecting the creation instant', async () => {
+    const queries: string[] = [];
+    const callback: RemoteCallback = async (query) => {
+      queries.push(query);
+      return { rows: [] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    await repository.listForStudent(
+      { schoolId, userId: studentId },
+      { limit: 20 },
+      new Date('2026-08-01T00:00:00.000Z'),
+    );
+
+    expect(queries[0]).toContain('created_at');
+    expect(queries[0]).toContain('school_id');
   });
 });

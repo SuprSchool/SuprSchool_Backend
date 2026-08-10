@@ -50,6 +50,7 @@ export interface StoredAssignmentResource {
 }
 
 export interface StoredAssignmentDetail {
+  assignedAt: string;
   classId: string;
   displayCode: string | null;
   dueAt: string;
@@ -298,6 +299,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     const cursor = query.cursor;
     const rows = await this.db
       .select({
+        assignedAt: assignments.createdAt,
         dueAt: assignments.dueAt,
         gradedAt: assignmentSubmissions.gradedAt,
         gradingType: assignments.gradingType,
@@ -347,6 +349,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
 
     const pageRows = rows.slice(0, query.limit);
     const items = pageRows.map((row) => ({
+      assignedAt: row.assignedAt.toISOString(),
       dueAt: row.dueAt.toISOString(),
       ...(row.gradedAt === null ? {} : { gradedAt: row.gradedAt.toISOString() }),
       gradingType: row.gradingType,
@@ -1337,6 +1340,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         .orderBy(desc(assignmentResources.createdAt), desc(assignmentResources.id)),
     ]);
     return {
+      assignedAt: record.createdAt.toISOString(),
       classId: record.classId,
       displayCode: record.displayCode,
       dueAt: record.dueAt.toISOString(),
