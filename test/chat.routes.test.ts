@@ -24,7 +24,10 @@ const foreignRoomId = '00000000-0000-4000-8000-000000000203';
 const confirmedSessionId = '00000000-0000-4000-8000-000000000801';
 const unconfirmedSessionId = '00000000-0000-4000-8000-000000000802';
 
-type Access = ChatRoomAccess & { userId: string };
+// Production reads the sender's role from `user_roles` when it projects a
+// message, so the fixture carries it on the access it hands back rather than
+// assuming every sender is a student.
+type Access = ChatRoomAccess & { userId: string; senderRole: 'student' | 'teacher' };
 
 function cursor(createdAt: string, id: string): string {
   return Buffer.from(JSON.stringify({ createdAt, id })).toString('base64url');
@@ -113,7 +116,7 @@ function createRepository() {
   const typingEvents: Array<{ expiresAt: string; isTyping: boolean; userId: string }> = [];
   const readCursors = new Map<string, StoredChatMessage>();
   const access: Access = {
-    classId: '00000000-0000-4000-8000-000000000301', id: roomId, kind: 'class', schoolId, subjectId: null, userId: studentId,
+    classId: '00000000-0000-4000-8000-000000000301', id: roomId, kind: 'class', schoolId, senderRole: 'student', subjectId: null, userId: studentId,
   };
   let count = 0;
   const repository: ChatRepository & ChatTypingPublisher = {
@@ -131,7 +134,7 @@ function createRepository() {
       if (requestedRoom === foreignRoomId) throw new AppError('NOT_FOUND', 404, 'Chat room not found');
       if (requestedRoom === forbiddenRoomId || identity.userId === outsiderId) throw new AppError('FORBIDDEN', 403, 'Chat room access denied');
       if (requestedRoom !== roomId && requestedRoom !== secondRoomId) throw new AppError('NOT_FOUND', 404, 'Chat room not found');
-      return { ...access, id: requestedRoom, userId: identity.userId };
+      return { ...access, id: requestedRoom, senderRole: identity.role, userId: identity.userId };
     },
     async findMessageByClientId(room, clientMessageId) {
       const requestedAccess = room as Access;
@@ -155,7 +158,11 @@ function createRepository() {
         createdAt: `2026-07-13T10:00:${String(count).padStart(2, '0')}.000Z`,
         id: `00000000-0000-4000-8000-${String(500 + count).padStart(12, '0')}`,
         roomId: requestedAccess.id,
-        sender: { displayName: 'Asha Student', id: requestedAccess.userId, role: 'student' },
+        sender: {
+          displayName: requestedAccess.senderRole === 'teacher' ? 'Rekha Teacher' : 'Asha Student',
+          id: requestedAccess.userId,
+          role: requestedAccess.senderRole,
+        },
       };
       messages.push(message);
       return message;
@@ -435,6 +442,69 @@ describe('chat REST API', () => {
       id: '00000000-0000-4000-8000-000000000167',
     });
     expect(JSON.stringify(queries[0])).toContain('HH24:MI:SS.US');
+  });
+
+  // `517:6941` draws the same clip the my-class flow filed against `253:11089`
+  // and asks for one upload path for both. The teacher composer therefore has
+  // no route of its own: these exercise the shared send path as a teacher.
+  it('teacher send accepts a confirmed attachment session', async () => {
+    const { app, files, messages } = createTestApp(createCache(), 'teacher');
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000190')
+      .send({ ...input('00000000-0000-4000-8000-000000000191', 'see attached'), attachmentSessionId: confirmedSessionId })
+      .expect(201);
+
+    expect(response.body.sender.role).toBe('teacher');
+    expect(response.body.attachments).toHaveLength(1);
+    expect(response.body.attachments[0]).toEqual({
+      contentType: 'application/pdf',
+      id: expect.any(String),
+      name: 'notes.pdf',
+      signedUrl: `https://signed.example/read/${schoolId}/chat-attachment/${roomId}/${confirmedSessionId}`,
+      sizeBytes: 1024,
+    });
+    expect(files.confirmations).toEqual([confirmedSessionId]);
+    expect(messages).toHaveLength(1);
+  });
+
+  it('teacher send rejects an unconfirmed session with 400', async () => {
+    const { app, messages } = createTestApp(createCache(), 'teacher');
+    const response = await request(app).post(`/v1/chat/rooms/${roomId}/messages`)
+      .set('Idempotency-Key', '00000000-0000-4000-8000-000000000192')
+      .send({ ...input('00000000-0000-4000-8000-000000000193'), attachmentSessionId: unconfirmedSessionId })
+      .expect(400);
+
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(messages).toHaveLength(0);
+  });
+
+  it('issues a teacher attachment upload session from the same route as the student one', async () => {
+    const { app, files } = createTestApp(createCache(), 'teacher');
+    await request(app).post(`/v1/chat/rooms/${roomId}/attachments/upload-sessions`)
+      .send({ contentType: 'application/pdf', displayName: 'notes.pdf', sizeBytes: 1024 })
+      .expect(201);
+
+    expect(files.uploadRequests).toEqual([{ displayName: 'notes.pdf', roomId }]);
+  });
+
+  it('keeps one send path and one upload path rather than forking per role', () => {
+    const router = createChatRouter({} as never, (async () => undefined) as never);
+    const routes = (router as unknown as {
+      stack: Array<{ route?: { methods: Record<string, boolean>; path: string } }>;
+    }).stack
+      .flatMap((layer) => (layer.route
+        ? Object.keys(layer.route.methods).map((method) => `${method.toUpperCase()} ${layer.route!.path}`)
+        : []))
+      .sort();
+
+    expect(routes).toEqual([
+      'GET /rooms',
+      'GET /rooms/:roomId/messages',
+      'POST /rooms/:roomId/attachments/upload-sessions',
+      'POST /rooms/:roomId/messages',
+      'POST /rooms/:roomId/read',
+      'POST /rooms/:roomId/typing',
+    ]);
   });
 
   it('recovers a durable message after an expired idempotency lease without charging quota or inserting', async () => {
