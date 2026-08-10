@@ -41,6 +41,7 @@ import type {
   ExamRubric,
   LeaderboardEntry,
   LeaderboardQuery,
+  TeacherExamAssessment,
   UpdateExamAssessmentInput,
   UpdateExamGroupInput,
   UpsertExamResultInput,
@@ -91,7 +92,7 @@ export interface ExamsRepository {
   }): Promise<StoredExamResource | undefined>;
   listReminderStudents(identity: ExamIdentity, assessmentId: string): Promise<ReadonlyArray<string> | undefined>;
   listSubmissionRoster(identity: ExamIdentity, assessmentId: string): Promise<ExamSubmissionRoster | undefined>;
-  listAssessmentsForTeacher(identity: ExamIdentity, groupId: string, query: ExamAssessmentListQuery): Promise<CursorPage<ExamAssessment>>;
+  listAssessmentsForTeacher(identity: ExamIdentity, groupId: string, query: ExamAssessmentListQuery): Promise<CursorPage<TeacherExamAssessment>>;
   listGroupsForStudent(identity: ExamIdentity, query: ExamGroupListQuery): Promise<CursorPage<ExamGroup>>;
   listGroupsForTeacher(identity: ExamIdentity, classId: string, query: ExamGroupListQuery): Promise<CursorPage<ExamGroup>>;
   listResults(identity: ExamIdentity, assessmentId: string, query: ExamResultListQuery): Promise<CursorPage<ExamResult> | undefined>;
@@ -389,7 +390,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
     identity: ExamIdentity,
     groupId: string,
     query: ExamAssessmentListQuery,
-  ): Promise<CursorPage<ExamAssessment>> {
+  ): Promise<CursorPage<TeacherExamAssessment>> {
     const cursor = query.cursor;
     const rows = await this.db.select({
       endsAt: classExams.endsAt,
@@ -407,6 +408,28 @@ export class DrizzleExamsRepository implements ExamsRepository {
           and result_status.published_at is not null
       )`,
       title: classExams.title,
+      // Graded students, aggregated over the whole class. Joining the roster keeps
+      // the count from ever exceeding totalStudents when a graded student has since
+      // left the class, so the card's Pending box cannot go negative.
+      submissionCount: sql<string>`(
+        select count(*)
+        from public.exam_results graded
+        join public.class_members roster
+          on roster.school_id = graded.school_id
+          and roster.class_id = "class_exams"."class_id"
+          and roster.student_id = graded.student_id
+          and roster.is_active
+        where graded.school_id = ${identity.schoolId}::uuid
+          and graded.assessment_id = "class_exams"."id"
+      )`,
+      // Enrolled students of the assessment's own class, not of the returned page.
+      totalStudents: sql<string>`(
+        select count(*)
+        from public.class_members roster
+        where roster.school_id = ${identity.schoolId}::uuid
+          and roster.class_id = "class_exams"."class_id"
+          and roster.is_active
+      )`,
     }).from(classExams).where(and(
       eq(classExams.schoolId, identity.schoolId),
       eq(classExams.examGroupId, groupId),
@@ -425,6 +448,8 @@ export class DrizzleExamsRepository implements ExamsRepository {
         ...assessment,
         isPublished: row.isPublished,
         resultsPublished: row.resultsPublished,
+        submissionCount: Number(row.submissionCount),
+        totalStudents: Number(row.totalStudents),
       }];
     });
     const last = items.at(-1);

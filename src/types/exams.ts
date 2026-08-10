@@ -90,6 +90,18 @@ export interface ExamAssessment {
   title: string;
 }
 
+/**
+ * The teacher assessment list entry. 748:7871 / 748:8071 draw Students / Graded /
+ * Pending per card; both figures are aggregated over the whole class in the
+ * listing query, never over the returned page. Pending is `totalStudents -
+ * submissionCount`, which cannot go negative because the graded count is
+ * restricted to students still actively enrolled in the class.
+ */
+export interface TeacherExamAssessment extends ExamAssessment {
+  submissionCount: number;
+  totalStudents: number;
+}
+
 export interface ExamAssessmentDetail extends ExamAssessment {
   resources: ReadonlyArray<ExamResource>;
   result?: ExamResult | undefined;

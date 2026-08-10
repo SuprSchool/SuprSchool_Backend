@@ -300,6 +300,7 @@ export function createAssignmentsService({
   async function toDetail(stored: StoredAssignmentDetail): Promise<AssignmentDetail> {
     return {
       classId: stored.classId,
+      displayCode: stored.displayCode,
       dueAt: stored.dueAt,
       gradingType: stored.gradingType,
       id: stored.id,

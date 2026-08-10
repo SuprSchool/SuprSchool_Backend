@@ -49,6 +49,7 @@ export interface StoredAssignmentResource {
 
 export interface StoredAssignmentDetail {
   classId: string;
+  displayCode: string | null;
   dueAt: string;
   gradingType: AssignmentGradingType;
   id: string;
@@ -186,6 +187,7 @@ type AssignmentRow = {
   classId: string;
   createdAt: Date;
   deletedAt: Date | null;
+  displayCode: string | null;
   dueAt: Date;
   gradingType: AssignmentGradingType;
   id: string;
@@ -212,6 +214,30 @@ type SubmissionRow = {
 
 function toIso(value: Date | null): string | undefined {
   return value === null ? undefined : value.toISOString();
+}
+
+const DISPLAY_CODE_UNIQUE_INDEX = 'assignments_display_code_per_school';
+const DISPLAY_CODE_MAX_ATTEMPTS = 5;
+const UNIQUE_VIOLATION = '23505';
+
+/**
+ * The sequence is read inside the insert, so two concurrent creates in the same
+ * school and year can compute the same code and race for the unique index. The
+ * loser is retried rather than failed: by then the winner is committed, so the
+ * recomputed count yields the next code. The driver wraps its errors, so the
+ * cause chain is walked rather than only the outermost error.
+ */
+function isDisplayCodeConflict(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== 'object' || current === null) return false;
+    const candidate = current as { cause?: unknown; code?: unknown; constraint_name?: unknown };
+    if (candidate.code === UNIQUE_VIOLATION && candidate.constraint_name === DISPLAY_CODE_UNIQUE_INDEX) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
 }
 
 function toStoredSubmission(row: SubmissionRow): StoredSubmission {
@@ -361,6 +387,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     const rows = await this.db
       .select({
         createdAt: assignments.createdAt,
+        displayCode: assignments.displayCode,
         dueAt: assignments.dueAt,
         gradingType: assignments.gradingType,
         id: assignments.id,
@@ -393,6 +420,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     const pageRows = rows.slice(0, query.limit);
     const items = pageRows.map((row) => ({
       createdAt: row.createdAt.toISOString(),
+      displayCode: row.displayCode,
       dueAt: row.dueAt.toISOString(),
       gradingType: row.gradingType,
       id: row.id,
@@ -415,7 +443,38 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     classId: string,
     input: CreateAssignmentInput,
   ): Promise<StoredAssignmentDetail | undefined> {
-    const created = await this.db.transaction(async (transaction) => {
+    const displayCodePrefix = `ASG-${new Date().getUTCFullYear()}-`;
+    let created: string | undefined;
+    for (let attempt = 1; attempt <= DISPLAY_CODE_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        created = await this.insertAssignment(identity, classId, input, displayCodePrefix);
+        break;
+      } catch (error) {
+        if (attempt === DISPLAY_CODE_MAX_ATTEMPTS || !isDisplayCodeConflict(error)) throw error;
+      }
+    }
+    if (created === undefined) return undefined;
+    const record = await this.findOne(and(
+      eq(assignments.id, created),
+      eq(assignments.schoolId, identity.schoolId),
+      eq(assignments.teacherId, identity.userId),
+    ));
+    return record === undefined ? undefined : this.withDetails(record);
+  }
+
+  /**
+   * One statement writes the row and derives its display code, so the sequence is
+   * read under the same snapshot that inserts. `count(*) + 1` counts only codes
+   * already issued to this school for this year; rows predating the column carry a
+   * null code and are skipped, which keeps the first new code at 001.
+   */
+  private async insertAssignment(
+    identity: AssignmentIdentity,
+    classId: string,
+    input: CreateAssignmentInput,
+    displayCodePrefix: string,
+  ): Promise<string | undefined> {
+    return this.db.transaction(async (transaction) => {
       const createdRows = await transaction.execute(sql<{ id: string }>`
         insert into public.assignments (
           school_id,
@@ -427,7 +486,8 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           due_at,
           is_graded,
           grading_type,
-          max_marks
+          max_marks,
+          display_code
         )
         select
           ${identity.schoolId}::uuid,
@@ -439,7 +499,13 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           ${input.dueAt}::timestamptz,
           ${input.isGradedAssignment},
           ${input.gradingType},
-          ${input.maxMarks ?? null}
+          ${input.maxMarks ?? null},
+          ${displayCodePrefix}::text || lpad((
+            select count(*) + 1
+            from public.assignments issued
+            where issued.school_id = ${identity.schoolId}::uuid
+              and issued.display_code like ${displayCodePrefix}::text || '%'
+          )::text, 3, '0')
         from public.class_subjects
         where school_id = ${identity.schoolId}::uuid
           and class_id = ${classId}::uuid
@@ -458,13 +524,6 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       })));
       return assignment.id;
     });
-    if (created === undefined) return undefined;
-    const record = await this.findOne(and(
-      eq(assignments.id, created),
-      eq(assignments.schoolId, identity.schoolId),
-      eq(assignments.teacherId, identity.userId),
-    ));
-    return record === undefined ? undefined : this.withDetails(record);
   }
 
   public async update(
@@ -1143,6 +1202,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         classId: assignments.classId,
         createdAt: assignments.createdAt,
         deletedAt: assignments.deletedAt,
+        displayCode: assignments.displayCode,
         dueAt: assignments.dueAt,
         gradingType: assignments.gradingType,
         id: assignments.id,
@@ -1189,6 +1249,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     ]);
     return {
       classId: record.classId,
+      displayCode: record.displayCode,
       dueAt: record.dueAt.toISOString(),
       gradingType: record.gradingType,
       id: record.id,

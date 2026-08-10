@@ -25,6 +25,9 @@ export const assignments = pgTable(
     teacherId: uuid('teacher_id').notNull().references(() => userProfiles.id, { onDelete: 'restrict' }),
     title: text('title').notNull(),
     instructions: text('instructions').notNull(),
+    // Human-readable code (ASG-<year>-<seq>) printed on the success screen.
+    // Null for rows written before the column existed; those keep showing their UUID.
+    displayCode: text('display_code'),
     dueAt: timestamp('due_at', { withTimezone: true }).notNull(),
     isGraded: boolean('is_graded').notNull(),
     gradingType: text('grading_type').$type<'Numeric' | 'Alphabetic'>().notNull(),
@@ -51,6 +54,7 @@ export const assignments = pgTable(
       table.createdAt.desc(),
       table.id.desc(),
     ).where(sql`${table.deletedAt} is null`),
+    uniqueIndex('assignments_display_code_per_school').on(table.schoolId, table.displayCode),
   ],
 );
 

@@ -792,3 +792,208 @@ describe("submission draft concurrency", () => {
     expect(statement).not.toContain("upload_session_id =");
   });
 });
+
+describe('assignment display codes and due timestamps', () => {
+  const displayCodePrefix = `ASG-${new Date().getUTCFullYear()}-`;
+
+  it('returns the human-readable display code on the created-assignment response', async () => {
+    const service = createService();
+    vi.mocked(service.create).mockResolvedValue({
+      classId: classRouteId,
+      displayCode: `${displayCodePrefix}001`,
+      dueAt: validAssignment.dueAt,
+      gradingType: 'Numeric',
+      id: assignmentRouteId,
+      instructions: validAssignment.instructions,
+      isGradedAssignment: true,
+      maxMarks: 10,
+      resources: [],
+      rubrics: [],
+      subjectId: validAssignment.subjectId,
+      title: validAssignment.title,
+    });
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    const response = await request(teacherApp)
+      .post('/teacher/classes/' + classRouteId + '/assignments')
+      .set('Idempotency-Key', 'assignment-create-display-code')
+      .send(validAssignment)
+      .expect(201);
+
+    expect(response.body.displayCode).toMatch(/^ASG-\d{4}-\d{3,}$/);
+  });
+
+  it('stamps a per-school yearly display code inside the create insert', async () => {
+    const queries: string[] = [];
+    const parameters: unknown[][] = [];
+    const callback: RemoteCallback = async (query, params) => {
+      queries.push(query);
+      parameters.push(params);
+      return { rows: [] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      databaseWithTransaction(callback),
+    );
+
+    await repository.create(
+      { schoolId, userId: teacherId },
+      classRouteId,
+      validAssignment as Parameters<AssignmentsRepository['create']>[2],
+    );
+
+    const insert = queries.find((query) => query.includes('insert into public.assignments'));
+    expect(insert).toBeDefined();
+    expect(insert).toContain('display_code');
+    // The sequence is derived in the statement itself, so concurrent creates cannot
+    // read the same count and both win.
+    expect(insert).toContain('lpad');
+    expect(insert).toContain('count(*) + 1');
+    expect(parameters.flat()).toContain(displayCodePrefix);
+  });
+
+  it('retries the create insert when a concurrent assignment claims the same display code', async () => {
+    let attempts = 0;
+    const callback: RemoteCallback = async (query) => {
+      if (query.includes('insert into public.assignments')) {
+        attempts += 1;
+        if (attempts === 1) {
+          throw Object.assign(new Error('duplicate key value violates unique constraint'), {
+            code: '23505',
+            constraint_name: 'assignments_display_code_per_school',
+          });
+        }
+      }
+      return { rows: [] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      databaseWithTransaction(callback),
+    );
+
+    await repository.create(
+      { schoolId, userId: teacherId },
+      classRouteId,
+      validAssignment as Parameters<AssignmentsRepository['create']>[2],
+    );
+
+    expect(attempts).toBe(2);
+  });
+
+  it('does not retry a create insert that failed for an unrelated reason', async () => {
+    let attempts = 0;
+    const callback: RemoteCallback = async (query) => {
+      if (query.includes('insert into public.assignments')) {
+        attempts += 1;
+        throw Object.assign(new Error('null value in column violates not-null constraint'), {
+          code: '23502',
+        });
+      }
+      return { rows: [] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      databaseWithTransaction(callback),
+    );
+
+    // The driver wraps the original error, so the behaviour under test is the
+    // attempt count: a non-conflict failure must surface on the first try.
+    await expect(repository.create(
+      { schoolId, userId: teacherId },
+      classRouteId,
+      validAssignment as Parameters<AssignmentsRepository['create']>[2],
+    )).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
+
+  it('reads the stored display code and full due timestamp back onto the detail read model', async () => {
+    const callback: RemoteCallback = async (query) => {
+      if (query.includes('assignment_rubrics') || query.includes('assignment_resources')) {
+        return { rows: [] };
+      }
+      return {
+        rows: [[
+          classRouteId,                                  // classId
+          new Date('2026-03-01T09:00:00.000Z'),          // createdAt
+          null,                                          // deletedAt
+          `${displayCodePrefix}007`,                     // displayCode
+          new Date('2026-04-05T22:00:00.000Z'),          // dueAt
+          'Numeric',                                     // gradingType
+          assignmentRouteId,                             // id
+          validAssignment.instructions,                  // instructions
+          true,                                          // isGraded
+          10,                                            // maxMarks
+          schoolId,                                      // schoolId
+          validAssignment.subjectId,                     // subjectId
+          teacherId,                                     // teacherId
+          validAssignment.title,                         // title
+          new Date('2026-03-01T09:00:00.000Z'),          // updatedAt
+        ]],
+      };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const detail = await repository.findForTeacher(
+      { schoolId, userId: teacherId },
+      assignmentRouteId,
+    );
+
+    expect(detail?.displayCode).toBe(`${displayCodePrefix}007`);
+    expect(detail?.dueAt).toBe('2026-04-05T22:00:00.000Z');
+  });
+
+  it('leaves the display code null for rows written before the column existed', async () => {
+    const callback: RemoteCallback = async (query) => {
+      if (query.includes('assignment_rubrics') || query.includes('assignment_resources')) {
+        return { rows: [] };
+      }
+      return {
+        rows: [[
+          classRouteId, new Date('2026-03-01T09:00:00.000Z'), null,
+          null,                                          // displayCode — pre-existing row
+          new Date('2026-04-05T22:00:00.000Z'), 'Numeric', assignmentRouteId,
+          validAssignment.instructions, true, 10, schoolId,
+          validAssignment.subjectId, teacherId, validAssignment.title,
+          new Date('2026-03-01T09:00:00.000Z'),
+        ]],
+      };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const detail = await repository.findForTeacher(
+      { schoolId, userId: teacherId },
+      assignmentRouteId,
+    );
+
+    expect(detail?.displayCode).toBeNull();
+  });
+
+  it('carries the time of day, not just the date, onto teacher assignment list items', async () => {
+    const callback: RemoteCallback = async () => ({
+      rows: [[
+        new Date('2026-03-01T09:00:00.000Z'),  // createdAt
+        `${displayCodePrefix}012`,             // displayCode
+        new Date('2026-04-05T22:00:00.000Z'),  // dueAt
+        'Numeric',                             // gradingType
+        assignmentRouteId,                     // id
+        true,                                  // isGraded
+        10,                                    // maxMarks
+        schoolId,                              // schoolId
+        validAssignment.subjectId,             // subjectId
+        validAssignment.title,                 // title
+      ]],
+    });
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const page = await repository.listForTeacher(
+      { schoolId, userId: teacherId },
+      classRouteId,
+      { limit: 20 },
+    );
+
+    expect(page.items[0]?.dueAt).toBe('2026-04-05T22:00:00.000Z');
+  });
+});
