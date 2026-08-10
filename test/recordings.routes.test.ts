@@ -117,7 +117,8 @@ describe('recording routers', () => {
     const resourceId = '77777777-7777-4777-8777-777777777777';
     vi.mocked(service.getTeacherRecording).mockResolvedValue({
       banner: null, classId, createdAt: '2026-07-14T10:00:00.000Z', description: 'Persisted',
-      durationMs: 60_000, id: recordingId, previewExpiresAt: '2026-07-14T12:00:00.000Z',
+      durationMs: 60_000, id: recordingId, period: '2nd Period',
+      previewExpiresAt: '2026-07-14T12:00:00.000Z',
       previewUrl: 'https://signed.example/audio', publishedAt: '2026-07-14T10:01:00.000Z',
       resources: [], sizeBytes: 1000, status: 'published', subjectId, title: 'Lesson',
     });
@@ -206,6 +207,7 @@ describe('recording routers', () => {
       createdAt: '2026-07-14T10:00:00.000Z',
       durationMs: null,
       id: recordingId,
+      period: '2nd Period',
       publishedAt: null,
       status: 'draft',
       subjectId,
@@ -222,6 +224,7 @@ describe('recording routers', () => {
         createdAt: '2026-07-14T10:00:00.000Z',
         durationMs: null,
         id: recordingId,
+        period: '2nd Period',
         publishedAt: null,
         status: 'draft',
         subjectId,
@@ -241,6 +244,8 @@ describe('recording routers', () => {
       createdAt: '2026-07-14T10:00:00.000Z',
       durationMs: 60_000,
       id: recordingId,
+      // Editing title and description must not disturb the stored period.
+      period: '2nd Period',
       publishedAt: '2026-07-14T10:01:00.000Z',
       status: 'published',
       subjectId,
@@ -365,6 +370,7 @@ describe('recording routers', () => {
       createdAt: '2026-07-14T10:00:00.000Z',
       durationMs: null,
       id: recordingId,
+      period: '2nd Period',
       publishedAt: null,
       status: 'draft' as const,
       subjectId,
@@ -443,6 +449,8 @@ describe('recording routers', () => {
       createdAt: '2026-07-14T10:00:00.000Z',
       durationMs: null,
       id: recordingId,
+      // Recorded outside any timetable slot: the client renders the date alone.
+      period: null,
       publishedAt: null,
       status: 'draft',
       subjectId,
@@ -992,5 +1000,162 @@ describe('recording cleanup scheduling', () => {
     );
     expect(platformDependencies).not.toContain('recording_upload_sessions');
     expect(platformDependencies).not.toContain('recording_cleanup_intents');
+  });
+});
+
+// 497:11334 and 513:6598 subtitle a recording as "date • period". The period is
+// resolved once, from the timetable slot live at draft creation, and stored — so
+// a later timetable edit cannot retitle a recording that already happened.
+describe('recording timetable period', () => {
+  function draftRepository(): RecordingRepository {
+    return {
+      activateUploadSession: vi.fn(), confirmResourceUpload: vi.fn(), confirmUpload: vi.fn(),
+      createDraft: vi.fn(), deleteRecording: vi.fn(), deleteResource: vi.fn(),
+      findEditableRecording: vi.fn(), findResourceEditableRecording: vi.fn(),
+      findResourceForUpload: vi.fn(), findUploadSession: vi.fn(), getPlaybackTarget: vi.fn(),
+      getProgress: vi.fn(), getStudentRecording: vi.fn(), getTeacherRecording: vi.fn(),
+      getTeacherPlaybackTarget: vi.fn(), issuePlaybackSession: vi.fn(),
+      listStudentResources: vi.fn(), listStudentRecordings: vi.fn(), listTeacherResources: vi.fn(),
+      listTeacherRecordings: vi.fn(), publishRecording: vi.fn(), updateRecording: vi.fn(),
+      releaseUploadReservation: vi.fn(), rejectUploadSession: vi.fn(),
+      reserveUploadSession: vi.fn(), saveProgress: vi.fn(),
+    };
+  }
+
+  function draftStorage(): RecordingStoragePort {
+    return {
+      confirmTusAudioUpload: vi.fn(),
+      createSignedPlaybackUrl: vi.fn(),
+      createTusUploadSession: vi.fn(),
+    };
+  }
+
+  const draft = {
+    classId,
+    createdAt: '2026-07-14T10:00:00.000Z',
+    durationMs: null,
+    id: recordingId,
+    period: '2nd Period',
+    publishedAt: null,
+    status: 'draft' as const,
+    subjectId,
+    title: 'Algebra',
+  };
+
+  it('returns the timetable period on recording detail', async () => {
+    const service = createService();
+    vi.mocked(service.getTeacherRecording).mockResolvedValue({
+      banner: null, classId, createdAt: '2026-07-14T10:00:00.000Z', description: null,
+      durationMs: 60_000, id: recordingId, period: '2nd Period',
+      previewExpiresAt: null, previewUrl: null, publishedAt: null, resources: [],
+      sizeBytes: 1000, status: 'draft', subjectId, title: 'Algebra',
+    });
+
+    const response = await request(createTeacherApp(service))
+      .get(`/teacher/recordings/${recordingId}`)
+      .expect(200);
+
+    expect(response.body.period).toBe('2nd Period');
+  });
+
+  it('returns null period for recordings outside the timetable', async () => {
+    const service = createService();
+    vi.mocked(service.getTeacherRecording).mockResolvedValue({
+      banner: null, classId, createdAt: '2026-07-14T19:00:00.000Z', description: null,
+      durationMs: 60_000, id: recordingId, period: null,
+      previewExpiresAt: null, previewUrl: null, publishedAt: null, resources: [],
+      sizeBytes: 1000, status: 'draft', subjectId, title: 'Extra',
+    });
+
+    const response = await request(createTeacherApp(service))
+      .get(`/teacher/recordings/${recordingId}`)
+      .expect(200);
+
+    expect(response.body.period).toBeNull();
+  });
+
+  it('resolves the period from the timetable and stores it on the draft', async () => {
+    const repositoryPort = draftRepository();
+    const findClassPeriodLabel = vi.fn().mockResolvedValue('2nd Period');
+    const service = createRecordingService({
+      periods: { findClassPeriodLabel },
+      repository: repositoryPort,
+      storage: draftStorage(),
+    });
+
+    await service.createDraft({ schoolId, userId }, { classId, subjectId, title: 'Algebra' });
+
+    expect(findClassPeriodLabel).toHaveBeenCalledWith(userId, schoolId, classId);
+    expect(repositoryPort.createDraft).toHaveBeenCalledWith(
+      { schoolId, userId },
+      { classId, period: '2nd Period', subjectId, title: 'Algebra' },
+    );
+  });
+
+  it('stores a null period when the draft is created outside any timetable slot', async () => {
+    const repositoryPort = draftRepository();
+    const service = createRecordingService({
+      periods: { findClassPeriodLabel: vi.fn().mockResolvedValue(null) },
+      repository: repositoryPort,
+      storage: draftStorage(),
+    });
+
+    await service.createDraft({ schoolId, userId }, { classId, subjectId, title: 'Extra' });
+
+    expect(repositoryPort.createDraft).toHaveBeenCalledWith(
+      { schoolId, userId },
+      { classId, period: null, subjectId, title: 'Extra' },
+    );
+  });
+
+  it('persists and reads back the period column on the draft insert', async () => {
+    const { database, execute } = databaseWith((query) => {
+      const text = queryText(query);
+      if (text.includes('select user_id as id')) return [{ id: userId }];
+      if (text.includes('insert into public.class_recordings')) return [draft];
+      return [];
+    });
+
+    await expect(new DrizzleRecordingsRepository(database).createDraft(
+      { schoolId, userId },
+      { classId, period: '2nd Period', subjectId, title: 'Algebra' },
+    )).resolves.toMatchObject({ period: '2nd Period' });
+
+    const insert = execute.mock.calls
+      .map(([query]) => queryText(query))
+      .find((text) => text.includes('insert into public.class_recordings'));
+    expect(insert).toContain('period');
+  });
+
+  it('selects the period on every teacher and student read path', async () => {
+    const reads: string[] = [];
+    const { database } = databaseWith((query) => {
+      const text = queryText(query);
+      if (text.includes('select user_id as id')) return [{ id: userId }];
+      if (text.includes('class_recordings')) reads.push(text);
+      return [];
+    });
+    const recordings = new DrizzleRecordingsRepository(database);
+
+    await recordings.listTeacherRecordings({ schoolId, userId }, { classId, limit: 25 });
+    await recordings.listStudentRecordings({ schoolId, userId }, { limit: 25 });
+    await recordings.getTeacherRecording({ schoolId, userId }, recordingId);
+    await recordings.getStudentRecording({ schoolId, userId }, recordingId);
+
+    expect(reads).toHaveLength(4);
+    for (const read of reads) expect(read).toContain('cr.period');
+  });
+
+  it('reports a stored null period as null rather than dropping the field', async () => {
+    const { database } = databaseWith((query) => {
+      const text = queryText(query);
+      if (text.includes('select user_id as id')) return [{ id: userId }];
+      if (text.includes('class_recordings')) return [{ ...draft, period: null }];
+      return [];
+    });
+
+    await expect(
+      new DrizzleRecordingsRepository(database).getTeacherRecording({ schoolId, userId }, recordingId),
+    ).resolves.toMatchObject({ period: null });
   });
 });

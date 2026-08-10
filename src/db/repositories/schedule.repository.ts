@@ -28,7 +28,37 @@ interface StudentClassContext {
   schoolId: string;
 }
 
+/**
+ * Timetable slots are naive wall-clock times — `supabase/seed.sql` writes
+ * 08:00–11:45, a school morning — while the database session runs in UTC.
+ * Every other timetable read takes its date from the client, so the server has
+ * never had to name the school's zone; resolving a period server-side does.
+ * One school per deployment today; a `schools.time_zone` column is the real
+ * fix and is filed in `docs/parity/SHARED-REQUESTS.md`.
+ */
+export const TIMETABLE_TIME_ZONE = 'Asia/Kolkata';
+
+function ordinal(position: number): string {
+  const mod100 = position % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${position}th`;
+  switch (position % 10) {
+    case 1:
+      return `${position}st`;
+    case 2:
+      return `${position}nd`;
+    case 3:
+      return `${position}rd`;
+    default:
+      return `${position}th`;
+  }
+}
+
 export interface ScheduleRepository {
+  findClassPeriodLabel(
+    teacherId: string,
+    schoolId: string,
+    classId: string,
+  ): Promise<string | null>;
   findStudentTimetable(
     studentId: string,
     schoolId: string,
@@ -100,6 +130,50 @@ export function toPendingAttendanceSlots(
 
 export class DrizzleScheduleRepository implements ScheduleRepository {
   public constructor(private readonly db: Database) {}
+
+  /**
+   * "What period is it right now for this class?" — the slot covering the
+   * current wall clock, named by its position in that class's day rather than
+   * by any stored label, so the answer cannot drift from the timetable the
+   * schedule screens render. Null when no slot covers the moment, when the
+   * teacher does not own the slot's subject, or when the role is not live.
+   */
+  public async findClassPeriodLabel(
+    teacherId: string,
+    schoolId: string,
+    classId: string,
+  ): Promise<string | null> {
+    const rows = await this.db.execute(sql`
+      with local_now as (
+        select (now() at time zone ${TIMETABLE_TIME_ZONE}::text) as at
+      ), day_slots as (
+        select slot.subject_id, slot.start_time, slot.end_time,
+          row_number() over (order by slot.start_time, slot.id) as position
+        from public.class_schedule_slots slot
+        cross join local_now
+        where slot.school_id = ${schoolId}::uuid
+          and slot.class_id = ${classId}::uuid
+          and slot.day_of_week = extract(dow from local_now.at)::int
+      )
+      select day_slots.position
+      from day_slots
+      cross join local_now
+      join public.class_subjects cs on cs.school_id = ${schoolId}::uuid
+        and cs.class_id = ${classId}::uuid
+        and cs.subject_id = day_slots.subject_id
+        and cs.teacher_id = ${teacherId}::uuid
+      join public.user_roles role on role.user_id = ${teacherId}::uuid
+        and role.school_id = ${schoolId}::uuid
+        and role.role = 'teacher' and role.is_active
+      where local_now.at::time >= day_slots.start_time
+        and local_now.at::time < day_slots.end_time
+      order by day_slots.position
+      limit 1
+    `) as readonly { position: number | string }[];
+
+    const position = rows[0]?.position;
+    return position === undefined ? null : `${ordinal(Number(position))} Period`;
+  }
 
   public async findStudentTimetable(
     studentId: string,

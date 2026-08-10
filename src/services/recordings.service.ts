@@ -73,12 +73,27 @@ export interface RecordingResourceFilePort {
   prepareUpload(identity: RecordingIdentity, recordingId: string, uploadSessionId: string): Promise<PreparedRecordingResourceUpload>;
 }
 
+/**
+ * "What period is it now for this class?", answered by the schedule repository
+ * so the timetable has one owner. Narrowed to the single question recordings
+ * asks of it.
+ */
+export interface RecordingPeriodPort {
+  findClassPeriodLabel(teacherId: string, schoolId: string, classId: string): Promise<string | null>;
+}
+
 export interface RecordingServiceDependencies {
   createId?: () => string;
   files?: RecordingResourceFilePort;
+  periods?: RecordingPeriodPort;
   repository: RecordingRepository;
   storage: RecordingStoragePort;
 }
+
+/** An unwired timetable leaves the period unknown, which is null — never a guess. */
+const unknownRecordingPeriod: RecordingPeriodPort = {
+  async findClassPeriodLabel() { return null; },
+};
 
 const unavailableRecordingResourceFiles: RecordingResourceFilePort = {
   async createReadUrl() { throw new Error('Recording resource Storage is not configured'); },
@@ -147,6 +162,7 @@ function toConfirmInput(
 export function createRecordingService({
   createId = randomUUID,
   files = unavailableRecordingResourceFiles,
+  periods = unknownRecordingPeriod,
   repository,
   storage,
 }: RecordingServiceDependencies): RecordingService {
@@ -168,7 +184,16 @@ export function createRecordingService({
   }
 
   return {
-    createDraft: (identity, input) => repository.createDraft(identity, input),
+    // Resolved once, here, and stored: a recording is subtitled with the period
+    // it happened in, so a later timetable edit must not retitle it.
+    async createDraft(identity, input) {
+      const period = await periods.findClassPeriodLabel(
+        identity.userId,
+        identity.schoolId,
+        input.classId,
+      );
+      return repository.createDraft(identity, { ...input, period });
+    },
     listTeacherRecordings: (identity, input) => repository.listTeacherRecordings(identity, input),
     listStudentRecordings: (identity, input) => repository.listStudentRecordings(identity, input),
     publishRecording: (identity, recordingId) => repository.publishRecording(identity, recordingId),
