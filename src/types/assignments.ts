@@ -48,6 +48,12 @@ export interface AssignmentResource {
 
 export interface AssignmentDetail {
   classId: string;
+  /**
+   * Human-readable code (ASG-<year>-<seq>), unique per school per year, printed
+   * on the assignment-created success screen (833:9534). Null for assignments
+   * written before the column existed — callers fall back to the id.
+   */
+  displayCode: string | null;
   dueAt: string;
   gradingType: AssignmentGradingType;
   id: string;
@@ -75,6 +81,7 @@ export interface StudentAssignmentItem {
 
 export interface TeacherAssignmentItem {
   createdAt: string;
+  displayCode: string | null;
   dueAt: string;
   gradingType: AssignmentGradingType;
   id: string;

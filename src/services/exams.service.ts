@@ -14,7 +14,6 @@ import type {
   CreateExamAssessmentInput,
   CreateExamGroupInput,
   CursorPage,
-  ExamAssessment,
   ExamAssessmentDetail,
   ExamAssessmentListQuery,
   ExamGroup,
@@ -30,6 +29,7 @@ import type {
   ExamUploadSession,
   LeaderboardEntry,
   LeaderboardQuery,
+  TeacherExamAssessment,
   UpdateExamAssessmentInput,
   UpdateExamGroupInput,
   UpsertExamResultInput,
@@ -99,7 +99,7 @@ export interface ExamsService {
   getAssessmentForStudent(identity: ExamIdentity, assessmentId: string): Promise<ExamAssessmentDetail>;
   getGroupForStudent(identity: ExamIdentity, groupId: string): Promise<ExamGroupDetail>;
   getLeaderboard(identity: ExamIdentity, groupId: string, query: LeaderboardQuery): Promise<CursorPage<LeaderboardEntry>>;
-  listAssessmentsForTeacher(identity: ExamIdentity, groupId: string, query: ExamAssessmentListQuery): Promise<CursorPage<ExamAssessment>>;
+  listAssessmentsForTeacher(identity: ExamIdentity, groupId: string, query: ExamAssessmentListQuery): Promise<CursorPage<TeacherExamAssessment>>;
   listGroupsForStudent(identity: ExamIdentity, query: ExamGroupListQuery): Promise<CursorPage<ExamGroup>>;
   listGroupsForTeacher(identity: ExamIdentity, classId: string, query: ExamGroupListQuery): Promise<CursorPage<ExamGroup>>;
   listResults(identity: ExamIdentity, assessmentId: string, query: ExamResultListQuery): Promise<CursorPage<ExamResult>>;

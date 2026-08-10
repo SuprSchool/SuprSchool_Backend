@@ -942,3 +942,105 @@ describe("result write revocation race", () => {
     expect(publishResults).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('teacher assessment roster counts', () => {
+  // 748:7871 / 748:8071 draw Students / Graded / Pending per exam card. The three
+  // boxes rendered 0 because the assessment list carried no roster figures at all.
+  function assessmentRow(submissionCount: string, totalStudents: string): ReadonlyArray<unknown> {
+    return [
+      '10:00',            // endsAt
+      groupRouteId,       // examGroupId
+      assessmentRouteId,  // id
+      100,                // maxMarks
+      '2026-08-12',       // scheduledOn
+      '09:00',            // startsAt
+      subjectRouteId,     // subjectId
+      null,               // syllabus
+      true,               // isPublished
+      false,              // resultsPublished
+      'Mathematics Test', // title
+      submissionCount,    // submissionCount — count(*) arrives as bigint text
+      totalStudents,      // totalStudents
+    ];
+  }
+
+  it('returns roster counts computed over the full class, not the returned page', async () => {
+    const service = createService();
+    vi.mocked(service.listAssessmentsForTeacher).mockResolvedValue({
+      items: [{
+        endsAt: '10:00',
+        id: assessmentRouteId,
+        maxMarks: 100,
+        scheduledOn: '2026-08-12',
+        startsAt: '09:00',
+        subjectId: subjectRouteId,
+        submissionCount: 20,
+        title: 'Mathematics Test',
+        totalStudents: 33,
+      }],
+    });
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp)
+      .get(`/teacher/exam-groups/${groupRouteId}/assessments`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.items[0].totalStudents).toBe(33);
+        expect(body.items[0].submissionCount).toBe(20);
+      });
+  });
+
+  it('computes the counts inside the listing query rather than from the page length', async () => {
+    let statement = '';
+    const callback: RemoteCallback = async (query) => {
+      statement = query;
+      return { rows: [assessmentRow('20', '33')] };
+    };
+    const repository = new DrizzleExamsRepository(drizzle(callback) as unknown as Database);
+
+    const page = await repository.listAssessmentsForTeacher(
+      { schoolId, userId: teacherId },
+      groupRouteId,
+      { limit: 20 },
+    );
+
+    // One row on the page, thirty-three enrolled: the figures cannot come from items.length.
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]?.totalStudents).toBe(33);
+    expect(page.items[0]?.submissionCount).toBe(20);
+    expect(statement).toContain('class_members');
+    expect(statement).toContain('exam_results');
+  });
+
+  it('scopes both roster aggregates to the authenticated school', async () => {
+    let parameters: unknown[] = [];
+    const callback: RemoteCallback = async (_query, params) => {
+      parameters = params;
+      return { rows: [] };
+    };
+    const repository = new DrizzleExamsRepository(drizzle(callback) as unknown as Database);
+
+    await repository.listAssessmentsForTeacher(
+      { schoolId, userId: teacherId },
+      groupRouteId,
+      { limit: 20 },
+    );
+
+    // The outer predicate plus both aggregate subqueries each bind the tenant.
+    expect(parameters.filter((value) => value === schoolId).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('reports zero enrolment as zero rather than dropping the assessment', async () => {
+    const callback: RemoteCallback = async () => ({ rows: [assessmentRow('0', '0')] });
+    const repository = new DrizzleExamsRepository(drizzle(callback) as unknown as Database);
+
+    const page = await repository.listAssessmentsForTeacher(
+      { schoolId, userId: teacherId },
+      groupRouteId,
+      { limit: 20 },
+    );
+
+    expect(page.items[0]?.totalStudents).toBe(0);
+    expect(page.items[0]?.submissionCount).toBe(0);
+  });
+});
