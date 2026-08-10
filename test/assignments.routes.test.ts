@@ -851,6 +851,49 @@ describe('assignment display codes and due timestamps', () => {
     expect(parameters.flat()).toContain(displayCodePrefix);
   });
 
+  it('pads the sequence to three digits without truncating a wider one', async () => {
+    const queries: string[] = [];
+    const callback: RemoteCallback = async (query) => {
+      queries.push(query);
+      return { rows: [] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      databaseWithTransaction(callback),
+    );
+
+    await repository.create(
+      { schoolId, userId: teacherId },
+      classRouteId,
+      validAssignment as Parameters<AssignmentsRepository['create']>[2],
+    );
+
+    const insert = queries.find((query) => query.includes('insert into public.assignments'));
+    // `lpad` truncates on the right when the input is longer than the width, so a
+    // literal 3 renders the 1000th code as 'ASG-<year>-100' — already issued to the
+    // 100th assignment. Every retry recomputes the same value, so creates in that
+    // school stay broken until the year rolls over. The width must be computed.
+    expect(insert).toContain('greatest(3, length(');
+    expect(insert).not.toMatch(/lpad\(\s*[^,]*,\s*3\s*,\s*'0'\s*\)/);
+  });
+
+  it('renders a four-digit sequence in full and still matches the published code shape', () => {
+    // Mirrors the statement's `lpad(n::text, greatest(3, length(n::text)), '0')`.
+    // The statement's own expression is asserted structurally above; this pins the
+    // shape the contract promises callers, including past 999.
+    const render = (sequence: number): string => {
+      const digits = String(sequence);
+      return `${displayCodePrefix}${digits.padStart(Math.max(3, digits.length), '0')}`;
+    };
+
+    expect(render(1)).toBe(`${displayCodePrefix}001`);
+    expect(render(999)).toBe(`${displayCodePrefix}999`);
+    expect(render(1000)).toBe(`${displayCodePrefix}1000`);
+    expect(render(1000)).not.toBe(render(100));
+    for (const sequence of [1, 999, 1000, 12345]) {
+      expect(render(sequence)).toMatch(/^ASG-\d{4}-\d{3,}$/);
+    }
+  });
+
   it('retries the create insert when a concurrent assignment claims the same display code', async () => {
     let attempts = 0;
     const callback: RemoteCallback = async (query) => {
@@ -876,6 +919,32 @@ describe('assignment display codes and due timestamps', () => {
     );
 
     expect(attempts).toBe(2);
+  });
+
+  it('rethrows once the display-code retries are exhausted instead of looping forever', async () => {
+    let attempts = 0;
+    const callback: RemoteCallback = async (query) => {
+      if (query.includes('insert into public.assignments')) {
+        attempts += 1;
+        throw Object.assign(new Error('duplicate key value violates unique constraint'), {
+          code: '23505',
+          constraint_name: 'assignments_display_code_per_school',
+        });
+      }
+      return { rows: [] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      databaseWithTransaction(callback),
+    );
+
+    // A conflict that never clears must surface, not spin. Retrying is only
+    // correct while a competing create is committing a code between attempts.
+    await expect(repository.create(
+      { schoolId, userId: teacherId },
+      classRouteId,
+      validAssignment as Parameters<AssignmentsRepository['create']>[2],
+    )).rejects.toThrow();
+    expect(attempts).toBe(5);
   });
 
   it('does not retry a create insert that failed for an unrelated reason', async () => {

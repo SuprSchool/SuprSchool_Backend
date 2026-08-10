@@ -467,6 +467,14 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
    * read under the same snapshot that inserts. `count(*) + 1` counts only codes
    * already issued to this school for this year; rows predating the column carry a
    * null code and are skipped, which keeps the first new code at 001.
+   *
+   * The pad width is `greatest(3, length(n))`, not a bare 3: `lpad` truncates on
+   * the right when its input is longer than the width, so a fixed 3 would render
+   * the 1000th code as 'ASG-<year>-100' — a code already issued to the 100th
+   * assignment. That collides on every attempt, and because nothing new commits
+   * between retries the recomputed value is identical, so the retry loop would
+   * exhaust and every later create in that school would fail until the year rolled
+   * over. Widening past three digits is what keeps the sequence collision-free.
    */
   private async insertAssignment(
     identity: AssignmentIdentity,
@@ -476,6 +484,12 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
   ): Promise<string | undefined> {
     return this.db.transaction(async (transaction) => {
       const createdRows = await transaction.execute(sql<{ id: string }>`
+        with issued_sequence as (
+          select count(*) + 1 as value
+          from public.assignments issued
+          where issued.school_id = ${identity.schoolId}::uuid
+            and issued.display_code like ${displayCodePrefix}::text || '%'
+        )
         insert into public.assignments (
           school_id,
           class_id,
@@ -500,17 +514,17 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           ${input.isGradedAssignment},
           ${input.gradingType},
           ${input.maxMarks ?? null},
-          ${displayCodePrefix}::text || lpad((
-            select count(*) + 1
-            from public.assignments issued
-            where issued.school_id = ${identity.schoolId}::uuid
-              and issued.display_code like ${displayCodePrefix}::text || '%'
-          )::text, 3, '0')
+          ${displayCodePrefix}::text || lpad(
+            issued_sequence.value::text,
+            greatest(3, length(issued_sequence.value::text)),
+            '0'
+          )
         from public.class_subjects
-        where school_id = ${identity.schoolId}::uuid
-          and class_id = ${classId}::uuid
-          and subject_id = ${input.subjectId}::uuid
-          and teacher_id = ${identity.userId}::uuid
+        cross join issued_sequence
+        where class_subjects.school_id = ${identity.schoolId}::uuid
+          and class_subjects.class_id = ${classId}::uuid
+          and class_subjects.subject_id = ${input.subjectId}::uuid
+          and class_subjects.teacher_id = ${identity.userId}::uuid
         returning id
       `);
       const assignment = (createdRows as unknown as ReadonlyArray<{ id: string }>)[0];
