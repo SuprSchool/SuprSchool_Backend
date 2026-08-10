@@ -2,35 +2,8 @@ import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 
 import { AppError, toAppError } from '../lib/errors.js';
-import { logger } from '../lib/logger.js';
+import { logger, safeErrorCause, safeErrorMessage } from '../lib/logger.js';
 import type { ApiErrorResponse } from '../types/api.js';
-
-function safeErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-
-  return message.replace(
-    /\b([a-z][a-z\d+.-]*:\/\/)[^/\s@]+@/gi,
-    (_match, protocol: string) => protocol + '[REDACTED]@',
-  );
-}
-
-const MAX_LOGGED_CAUSE_DEPTH = 4;
-
-/**
- * A wrapped dependency failure carries the actionable detail on `cause` — a
- * missing ffprobe binary reaches this handler as a generic 503 whose cause is
- * `spawn ffprobe ENOENT`. Without the chain the log names only the wrapper, so
- * a permanent misconfiguration is indistinguishable from a transient outage.
- */
-function errorCauseChain(error: unknown): string | undefined {
-  const messages: string[] = [];
-  let current: unknown = (error as { cause?: unknown } | null)?.cause;
-  for (let depth = 0; depth < MAX_LOGGED_CAUSE_DEPTH && current !== undefined && current !== null; depth += 1) {
-    messages.push(safeErrorMessage(current));
-    current = (current as { cause?: unknown }).cause;
-  }
-  return messages.length === 0 ? undefined : messages.join(' <- ');
-}
 
 function isMalformedJsonError(error: unknown): boolean {
   return error instanceof SyntaxError
@@ -68,7 +41,7 @@ export function errorHandler(
     : 'unknown';
 
   if (appError.status >= 500) {
-    const errorCause = errorCauseChain(error);
+    const errorCause = safeErrorCause(error);
     logger.error({
       errorCode: appError.code,
       ...(errorCause === undefined ? {} : { errorCause }),
