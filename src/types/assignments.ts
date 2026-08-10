@@ -84,13 +84,25 @@ export interface TeacherAssignmentItem {
   title: string;
 }
 
+export const submissionCompletionActions = ['complete', 'incomplete'] as const;
+
+export type SubmissionCompletionAction = (typeof submissionCompletionActions)[number];
+
 export interface AssignmentSubmission {
+  // Required-but-nullable rather than optional: an uncompleted submission is a
+  // known absence the Completed tab has to draw, not a missing field.
+  completedAt: string | null;
   feedback?: string | undefined;
   gradedAt?: string | undefined;
   id: string;
   marks?: number | undefined;
   studentId: string;
   submittedAt?: string | undefined;
+}
+
+export interface SubmissionCompletion {
+  completedAt: string | null;
+  id: string;
 }
 
 export interface StudentAssignmentListQuery {

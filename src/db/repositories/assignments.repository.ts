@@ -29,6 +29,8 @@ import type {
   GradeSubmissionInput,
   StudentAssignmentItem,
   StudentAssignmentListQuery,
+  SubmissionCompletion,
+  SubmissionCompletionAction,
   SubmissionCursor,
   SubmissionListQuery,
   TeacherAssignmentItem,
@@ -163,6 +165,12 @@ export interface AssignmentsRepository {
     assignmentId: string,
     query: SubmissionListQuery,
   ): Promise<CursorPage<StoredSubmission> | undefined>;
+  setSubmissionCompletion(
+    identity: AssignmentIdentity,
+    submissionId: string,
+    action: SubmissionCompletionAction,
+    completedAt: Date,
+  ): Promise<SubmissionCompletion | undefined>;
   studentCanBeReminded(
     identity: AssignmentIdentity,
     assignmentId: string,
@@ -201,6 +209,7 @@ type AssignmentRow = {
 
 type SubmissionRow = {
   assignmentId: string;
+  completedAt: Date | null;
   feedback: string | null;
   gradedAt: Date | null;
   id: string;
@@ -217,6 +226,7 @@ function toIso(value: Date | null): string | undefined {
 function toStoredSubmission(row: SubmissionRow): StoredSubmission {
   return {
     assignmentId: row.assignmentId,
+    completedAt: row.completedAt === null ? null : row.completedAt.toISOString(),
     ...(row.feedback === null ? {} : { feedback: row.feedback }),
     ...(row.gradedAt === null ? {} : { gradedAt: row.gradedAt.toISOString() }),
     id: row.id,
@@ -612,6 +622,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     return this.db.transaction(async (transaction) => {
       const lockedRows = await transaction.execute(sql<{
         assignment_id: string;
+        completed_at: Date | null;
         feedback: string | null;
         graded_at: Date | null;
         id: string;
@@ -630,7 +641,8 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           submitted_at,
           marks,
           feedback,
-          graded_at
+          graded_at,
+          completed_at
         from public.assignment_submissions
         where school_id = ${input.identity.schoolId}::uuid
           and assignment_id = ${input.assignmentId}::uuid
@@ -639,6 +651,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       `);
       const locked = (lockedRows as unknown as ReadonlyArray<{
         assignment_id: string;
+        completed_at: Date | null;
         feedback: string | null;
         graded_at: Date | null;
         id: string;
@@ -652,6 +665,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       if (locked.upload_session_id !== null) {
         const submission = toStoredSubmission({
           assignmentId: locked.assignment_id,
+          completedAt: locked.completed_at,
           feedback: locked.feedback,
           gradedAt: locked.graded_at,
           id: locked.id,
@@ -667,6 +681,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
 
       const updatedRows = await transaction.execute(sql<{
         assignment_id: string;
+        completed_at: Date | null;
         feedback: string | null;
         graded_at: Date | null;
         id: string;
@@ -705,10 +720,12 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           submitted_at,
           marks,
           feedback,
-          graded_at
+          graded_at,
+          completed_at
       `);
       const updated = (updatedRows as unknown as ReadonlyArray<{
         assignment_id: string;
+        completed_at: Date | null;
         feedback: string | null;
         graded_at: Date | null;
         id: string;
@@ -719,6 +736,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       }>)[0];
       return updated === undefined ? undefined : { kind: 'attached' as const, submission: toStoredSubmission({
         assignmentId: updated.assignment_id,
+        completedAt: updated.completed_at,
         feedback: updated.feedback,
         gradedAt: updated.graded_at,
         id: updated.id,
@@ -740,6 +758,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     const rows = await this.db
       .select({
         assignmentId: assignmentSubmissions.assignmentId,
+        completedAt: assignmentSubmissions.completedAt,
         feedback: assignmentSubmissions.feedback,
         gradedAt: assignmentSubmissions.gradedAt,
         id: assignmentSubmissions.id,
@@ -836,6 +855,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       ))
       .returning({
         assignmentId: assignmentSubmissions.assignmentId,
+        completedAt: assignmentSubmissions.completedAt,
         feedback: assignmentSubmissions.feedback,
         gradedAt: assignmentSubmissions.gradedAt,
         id: assignmentSubmissions.id,
@@ -845,6 +865,60 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         submittedAt: assignmentSubmissions.submittedAt,
       });
     return updated === undefined ? undefined : toStoredSubmission(updated);
+  }
+
+  // Completion is a timestamp on the submission, independent of grading, so this
+  // reuses the ownership half of the grade guard — school, owning teacher, live
+  // assignment, live class_subjects assignment — and deliberately drops the
+  // grading-only predicates (`gradingType = 'Numeric'`, `maxMarks >= marks`) and
+  // the `submitted_at is not null` requirement: a teacher can close out work that
+  // was never uploaded. Both directions are idempotent — `complete` coalesces onto
+  // any existing instant so a replay preserves the first one, `incomplete` nulls it.
+  public async setSubmissionCompletion(
+    identity: AssignmentIdentity,
+    submissionId: string,
+    action: SubmissionCompletionAction,
+    completedAt: Date,
+  ): Promise<SubmissionCompletion | undefined> {
+    const [updated] = await this.db
+      .update(assignmentSubmissions)
+      .set({
+        completedAt: action === 'complete'
+          ? sql`coalesce(${assignmentSubmissions.completedAt}, ${completedAt})`
+          : null,
+        updatedAt: completedAt,
+      })
+      .where(and(
+        eq(assignmentSubmissions.id, submissionId),
+        eq(assignmentSubmissions.schoolId, identity.schoolId),
+        this.completionAuthorization(identity),
+      ))
+      .returning({
+        completedAt: assignmentSubmissions.completedAt,
+        id: assignmentSubmissions.id,
+      });
+    return updated === undefined ? undefined : {
+      completedAt: updated.completedAt === null ? null : updated.completedAt.toISOString(),
+      id: updated.id,
+    };
+  }
+
+  private completionAuthorization(identity: AssignmentIdentity) {
+    return exists(this.db
+      .select({ id: assignments.id })
+      .from(assignments)
+      .innerJoin(classSubjects, and(
+        eq(classSubjects.schoolId, assignments.schoolId),
+        eq(classSubjects.classId, assignments.classId),
+        eq(classSubjects.subjectId, assignments.subjectId),
+        eq(classSubjects.teacherId, identity.userId),
+      ))
+      .where(and(
+        eq(assignments.id, assignmentSubmissions.assignmentId),
+        eq(assignments.schoolId, identity.schoolId),
+        eq(assignments.teacherId, identity.userId),
+        isNull(assignments.deletedAt),
+      )));
   }
 
   public async listStudentIdsForAssignment(
@@ -976,7 +1050,8 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
   ): Promise<StoredSubmission | undefined> {
     const rows = await this.db.execute(sql<SubmissionRow>`
       select submission.id, submission.assignment_id, submission.student_id, submission.object_path,
-        submission.submitted_at, submission.marks, submission.feedback, submission.graded_at
+        submission.submitted_at, submission.marks, submission.feedback, submission.graded_at,
+        submission.completed_at as "completedAt"
       from public.assignment_submissions submission
       join public.assignments assignment
         on assignment.id = submission.assignment_id

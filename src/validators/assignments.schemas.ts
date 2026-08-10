@@ -8,6 +8,7 @@ import {
   decodeAssignmentDueCursor,
   decodeSubmissionCursor,
   studentAssignmentStatusValues,
+  submissionCompletionActions,
   teacherAssignmentStatusValues,
 } from '../types/assignments.js';
 
@@ -116,6 +117,11 @@ export const gradeSubmissionSchema = z.object({
   marks: z.coerce.number().finite().min(0),
 });
 export const emptyBodySchema = z.object({}).strict();
+
+// `.strict()` so a client cannot smuggle its own completedAt past the server clock.
+export const submissionCompletionSchema = z.object({
+  action: z.enum(submissionCompletionActions),
+}).strict();
 
 export type StudentAssignmentListQueryInput = z.infer<typeof studentAssignmentListQuerySchema>;
 export type TeacherAssignmentListQueryInput = z.infer<typeof teacherAssignmentListQuerySchema>;

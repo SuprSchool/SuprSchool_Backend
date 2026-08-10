@@ -22,6 +22,8 @@ import type {
   GradeSubmissionInput,
   StudentAssignmentItem,
   StudentAssignmentListQuery,
+  SubmissionCompletion,
+  SubmissionCompletionAction,
   SubmissionListQuery,
   SubmissionUploadSession,
   TeacherAssignmentItem,
@@ -157,6 +159,11 @@ export interface AssignmentsService {
     assignmentId: string,
     query: SubmissionListQuery,
   ): Promise<CursorPage<AssignmentSubmission>>;
+  setCompletion(
+    identity: AssignmentIdentity,
+    submissionId: string,
+    action: SubmissionCompletionAction,
+  ): Promise<SubmissionCompletion>;
   remindAll(
     identity: AssignmentIdentity,
     assignmentId: string,
@@ -271,6 +278,7 @@ function readCachedStudentAssignmentPage(
 
 function toSubmission(stored: StoredSubmission): AssignmentSubmission {
   return {
+    completedAt: stored.completedAt,
     ...(stored.feedback === undefined ? {} : { feedback: stored.feedback }),
     ...(stored.gradedAt === undefined ? {} : { gradedAt: stored.gradedAt }),
     id: stored.id,
@@ -584,6 +592,20 @@ export function createAssignmentsService({
         },
       });
       return result.body;
+    },
+
+    // No idempotency-store wrapper: both directions are naturally idempotent, so a
+    // replay is indistinguishable from the first call. Completion carries no
+    // outbox event either — it is a teacher-side bookkeeping flag, not something
+    // the student is notified about, and it is independent of grading.
+    // A submission that is missing, in another school, or on an assignment this
+    // teacher no longer owns is one 404 — the guard must not confirm which.
+    async setCompletion(identity, submissionId, action) {
+      const completion = await repository.setSubmissionCompletion(
+        identity, submissionId, action, clock(),
+      );
+      if (completion === undefined) throw notFound();
+      return completion;
     },
 
     async remindStudent(identity, assignmentId, studentId, idempotencyKey) {

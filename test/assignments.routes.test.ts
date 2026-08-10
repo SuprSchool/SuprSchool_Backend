@@ -56,6 +56,7 @@ function createService(): AssignmentsService {
     listSubmissions: vi.fn(),
     remindAll: vi.fn(),
     remindStudent: vi.fn(),
+    setCompletion: vi.fn(),
     update: vi.fn(),
   };
 }
