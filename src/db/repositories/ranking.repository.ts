@@ -275,17 +275,17 @@ export class DrizzleRankingRepository implements RankingRepository {
         select
           ${snapshot.id}::uuid,
           ${locked.schoolId}::uuid,
-          candidate.user_id,
+          candidate."userId",
           candidate.rank,
           candidate.points,
           candidate.marks,
-          candidate.streak_count
+          candidate."streakCount"
         from jsonb_to_recordset(${payload}::jsonb) as candidate(
-          user_id uuid,
+          "userId" uuid,
           rank integer,
           points integer,
           marks numeric,
-          streak_count integer
+          "streakCount" integer
         )
       `);
 

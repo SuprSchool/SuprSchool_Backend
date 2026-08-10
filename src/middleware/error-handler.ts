@@ -2,17 +2,8 @@ import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 
 import { AppError, toAppError } from '../lib/errors.js';
-import { logger } from '../lib/logger.js';
+import { logger, safeErrorMessage } from '../lib/logger.js';
 import type { ApiErrorResponse } from '../types/api.js';
-
-function safeErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-
-  return message.replace(
-    /\b([a-z][a-z\d+.-]*:\/\/)[^/\s@]+@/gi,
-    (_match, protocol: string) => protocol + '[REDACTED]@',
-  );
-}
 
 function isMalformedJsonError(error: unknown): boolean {
   return error instanceof SyntaxError

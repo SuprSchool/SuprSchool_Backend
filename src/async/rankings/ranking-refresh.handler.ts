@@ -8,7 +8,12 @@ export function createRankingRefreshHandler(
 ): QueueMessageHandler<unknown> {
   return async (message) => {
     if (message.eventType !== rankingRefreshEventType || !isRankingRefreshPayload(message.payload)) {
-      throw new Error(`Unexpected ranking queue payload: `);
+      // Keys only: the rejection is logged, and a malformed message may carry
+      // anything in its values.
+      throw new Error(
+        `Unexpected ranking queue payload: event type "${message.eventType}" with keys `
+        + `[${payloadKeys(message.payload).join(', ')}]`,
+      );
     }
     await service.refresh({
       eventId: message.eventId,
@@ -17,6 +22,10 @@ export function createRankingRefreshHandler(
       targetVersion: message.payload.targetVersion,
     });
   };
+}
+
+function payloadKeys(payload: unknown): readonly string[] {
+  return typeof payload === 'object' && payload !== null ? Object.keys(payload) : [];
 }
 
 function isRankingRefreshPayload(payload: unknown): payload is RankingRefreshPayload {

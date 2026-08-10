@@ -3,10 +3,25 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { Database } from '../../db/client.js';
 import type { QueueMessage } from '../queue/queue-message.js';
 import type { QueueExecutionContext, QueueMessageHandler } from '../queue/queue-worker.js';
-import type { AcademicEventType } from './academic-outbox.js';
+import { ACADEMIC_EVENT_TYPES, type AcademicEventType } from './academic-outbox.js';
 
-export type AcademicQueueMessage = QueueMessage<Record<string, string>> & {
-  eventType: AcademicEventType;
+/**
+ * The diary outbox publishes onto `notification_dispatch` too, so this handler
+ * serves more than the academic outbox. Its payload carries a numeric
+ * `revision`, which is why the payload is keyed to `unknown` rather than to
+ * `string`.
+ */
+export const DIARY_PUBLISHED_EVENT_TYPE = 'diary.published';
+
+export const NOTIFICATION_EVENT_TYPES = [
+  ...ACADEMIC_EVENT_TYPES,
+  DIARY_PUBLISHED_EVENT_TYPE,
+] as const;
+
+export type NotificationEventType = AcademicEventType | typeof DIARY_PUBLISHED_EVENT_TYPE;
+
+export type AcademicQueueMessage = QueueMessage<Record<string, unknown>> & {
+  eventType: NotificationEventType;
 };
 
 export interface AcademicNotificationRecipient {
@@ -211,6 +226,24 @@ export class DrizzleAcademicNotificationDeliveryStore
             and subject.subject_id = assessment.subject_id
             and subject.teacher_id = assessment.teacher_id
         )
+      union
+      select member.student_id as user_id
+      from public.class_diary_entries diary
+      join public.class_members member
+        on member.school_id = diary.school_id
+        and member.class_id = diary.class_id
+        and member.is_active
+      where ${message.eventType} = ${DIARY_PUBLISHED_EVENT_TYPE}
+        and diary.id = ${message.payload.diaryId ?? null}::uuid
+        and diary.school_id = ${message.schoolId}::uuid
+        and diary.deleted_at is null
+        and exists (
+          select 1
+          from public.class_subjects subject
+          where subject.id = diary.class_subject_id
+            and subject.school_id = diary.school_id
+            and subject.teacher_id = diary.teacher_id
+        )
     `;
   }
 
@@ -292,6 +325,7 @@ export function createAcademicNotificationHandlers(
     rawMessage: QueueMessage<unknown>,
     context: QueueExecutionContext,
   ): Promise<void> => {
+    assertNotificationEventType(rawMessage.eventType);
     const message = rawMessage as AcademicQueueMessage;
     const recipients = await store.resolveRecipients(message);
     await store.persistInboxAndPushes(message, recipients);
@@ -312,7 +346,15 @@ export function createAcademicNotificationHandlers(
   return { notification: deliver, reminder: deliver };
 }
 
-function notificationCopy(eventType: AcademicEventType): { body: string; title: string } {
+function assertNotificationEventType(
+  eventType: string,
+): asserts eventType is NotificationEventType {
+  if (!(NOTIFICATION_EVENT_TYPES as readonly string[]).includes(eventType)) {
+    throw new Error(`Unsupported notification event type: ${eventType}`);
+  }
+}
+
+function notificationCopy(eventType: NotificationEventType): { body: string; title: string } {
   switch (eventType) {
     case 'announcement.published':
       return { body: 'A new class announcement is available.', title: 'New announcement' };
@@ -328,5 +370,13 @@ function notificationCopy(eventType: AcademicEventType): { body: string; title: 
       return { body: 'You have an exam reminder.', title: 'Exam reminder' };
     case 'exam.results_published':
       return { body: 'Exam results are now available.', title: 'Exam results published' };
+    case DIARY_PUBLISHED_EVENT_TYPE:
+      return { body: 'A new class diary entry is available.', title: 'New diary entry' };
+    default: {
+      // A queue payload is untrusted input; without this the switch fell
+      // through and every caller dereferenced `undefined`.
+      const unsupported: never = eventType;
+      throw new Error(`Unsupported notification event type: ${String(unsupported)}`);
+    }
   }
 }
