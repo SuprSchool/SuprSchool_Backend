@@ -42,6 +42,18 @@ export interface ExamRubric {
   sectionTitle: string;
 }
 
+/**
+ * One grading-rubric row as 253:8504 draws it: the section name and its marks
+ * printed as secured/total ("20/25 Marks"). `securedMarks` is null until
+ * evaluation records a per-section breakdown, and the client hides the figure
+ * rather than inventing one.
+ */
+export interface ExamGradingRubricItem {
+  section: string;
+  securedMarks: number | null;
+  totalMarks: number;
+}
+
 export interface ExamResource {
   id: string;
   name: string;
@@ -102,10 +114,32 @@ export interface TeacherExamAssessment extends ExamAssessment {
   totalStudents: number;
 }
 
+/**
+ * The subject exam detail. 253:8067 (upcoming) and 253:8647 (evaluated) draw
+ * Points, Feedback, Syllabus, Resources, Grading Rubric and a View Leaderboard
+ * row on top of the date and marks cards.
+ *
+ * Every section-bearing field is present-and-nullable rather than optional: the
+ * shape lands once, and a section whose datum the grading pipeline has not
+ * filled reads `null` so the client hides that section instead of rendering a
+ * placeholder. `examGroupId` is what View Leaderboard routes through, and the
+ * student read filters on a non-null exam group, so it is always a string.
+ */
 export interface ExamAssessmentDetail extends ExamAssessment {
+  evaluatedDate: string | null;
+  examGroupId: string;
+  feedback: string | null;
+  gradingRubric: ReadonlyArray<ExamGradingRubricItem> | null;
+  pointsAvailable: number | null;
+  pointsEarned: number | null;
   resources: ReadonlyArray<ExamResource>;
   result?: ExamResult | undefined;
   rubrics: ReadonlyArray<ExamRubric>;
+  /**
+   * `class_exams.syllabus` is one text column; 253:8067 draws its lines as a
+   * list. Split, trimmed, empties dropped — null when nothing survives.
+   */
+  syllabusTopics: ReadonlyArray<string> | null;
 }
 
 export interface ExamGroup {

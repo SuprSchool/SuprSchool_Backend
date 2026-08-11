@@ -21,6 +21,7 @@ import {
   examResultRevisions,
   examRubrics,
 } from '../schema/exams.js';
+import { pointEarningRules } from '../schema/points.js';
 import type {
   CreateExamAssessmentInput,
   CreateExamGroupInput,
@@ -28,6 +29,7 @@ import type {
   ExamAssessment,
   ExamAssessmentDetail,
   ExamAssessmentListQuery,
+  ExamGradingRubricItem,
   ExamGroup,
   ExamGroupDetail,
   ExamGroupListQuery,
@@ -57,7 +59,12 @@ export interface StoredExamResource extends Omit<ExamResource, 'signedUrl'> {
   objectPath: string;
 }
 
-export interface StoredExamAssessment extends Omit<ExamAssessmentDetail, 'resources'> {
+/**
+ * `groupId` is the repository's name for the exam group; the service renames it
+ * to the wire's `examGroupId`, so the detail type's copy is omitted here rather
+ * than carried twice.
+ */
+export interface StoredExamAssessment extends Omit<ExamAssessmentDetail, 'examGroupId' | 'resources'> {
   classId: string;
   groupId: string;
   resources: ReadonlyArray<StoredExamResource>;
@@ -165,6 +172,39 @@ function toAssessment(row: AssessmentRow): ExamAssessment | undefined {
   };
 }
 
+/**
+ * Mirrors `pointAwardRuleCodes.assessmentResultPublished`. Repeated rather than
+ * imported: repositories do not depend on services.
+ */
+const assessmentResultPublishedRuleCode = 'assessment-result-published';
+
+/**
+ * 253:8504 prints each section as secured/total. The definition rows carry the
+ * total; the secured half comes from the student's own result and is null until
+ * evaluation records a breakdown. No rubric rows at all means no section.
+ */
+function toGradingRubric(
+  rubrics: ReadonlyArray<ExamRubric>,
+  securedMarks: Record<string, number> | null,
+): ReadonlyArray<ExamGradingRubricItem> | null {
+  if (rubrics.length === 0) return null;
+  return rubrics.map((rubric) => ({
+    section: rubric.sectionTitle,
+    securedMarks: securedMarks?.[String(rubric.position)] ?? null,
+    totalMarks: rubric.marks,
+  }));
+}
+
+/** One stored text column; 253:8067 draws its lines as a list. */
+function toSyllabusTopics(syllabus: string | null): ReadonlyArray<string> | null {
+  if (syllabus === null) return null;
+  const topics = syllabus
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return topics.length === 0 ? null : topics;
+}
+
 function toResult(row: ResultRow): ExamResult {
   return {
     ...(row.feedback === null ? {} : { feedback: row.feedback }),
@@ -263,7 +303,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
       this.studentAudienceForAssessment(identity),
       this.activeGroupForAssessment(identity),
     )).limit(1);
-    return assessment === undefined ? undefined : this.withDetails(assessment, identity.userId);
+    return assessment === undefined ? undefined : this.withDetails(assessment, identity, identity.userId);
   }
 
   public async findAssessmentForTeacher(
@@ -1287,10 +1327,20 @@ export class DrizzleExamsRepository implements ExamsRepository {
     });
   }
 
-  private async withDetails(row: AssessmentRow, studentId?: string): Promise<StoredExamAssessment | undefined> {
+  /**
+   * Assembles the sections 253:8067 / 253:8647 draw. `studentId` is present
+   * only on the student read: the points a student banked and their per-section
+   * secured marks are personal, so the teacher's copy of the same assessment
+   * reads null for both rather than borrowing another student's figures.
+   */
+  private async withDetails(
+    row: AssessmentRow,
+    identity: ExamIdentity,
+    studentId?: string,
+  ): Promise<StoredExamAssessment | undefined> {
     const assessment = toAssessment(row);
     if (assessment === undefined || row.classId === undefined || row.examGroupId === null) return undefined;
-    const [rubrics, resources, result] = await Promise.all([
+    const [rubrics, resources, evaluation, pointsAvailable, pointsEarned] = await Promise.all([
       this.db.select({
         description: examRubrics.description,
         marks: examRubrics.marks,
@@ -1302,24 +1352,87 @@ export class DrizzleExamsRepository implements ExamsRepository {
         name: examResources.displayName,
         objectPath: examResources.objectPath,
       }).from(examResources).where(eq(examResources.assessmentId, assessment.id)).orderBy(desc(examResources.createdAt), desc(examResources.id)),
-      studentId === undefined ? Promise.resolve([]) : this.findPublishedResult(assessment.id, studentId),
+      studentId === undefined ? Promise.resolve(undefined) : this.findPublishedResult(assessment.id, studentId),
+      this.findAssessmentPointsAvailable(identity.schoolId),
+      studentId === undefined
+        ? Promise.resolve(null)
+        : this.findAwardedAssessmentPoints(identity.schoolId, assessment.id, studentId),
     ]);
+    const result = evaluation?.result;
     return {
       ...assessment,
       classId: row.classId,
+      // The student sees the result on publication, so that is the date the
+      // "Result Evaluated On" card (261:17719) prints.
+      evaluatedDate: result?.publishedAt?.toISOString() ?? null,
+      feedback: result?.feedback ?? null,
+      gradingRubric: toGradingRubric(rubrics, evaluation?.rubricSecuredMarks ?? null),
       groupId: row.examGroupId,
+      pointsAvailable,
+      pointsEarned,
       resources,
-      ...(result[0] === undefined ? {} : { result: toResult(result[0]) }),
+      ...(result === undefined ? {} : { result: toResult(result) }),
       rubrics: rubrics satisfies ReadonlyArray<ExamRubric>,
+      syllabusTopics: toSyllabusTopics(row.syllabus),
     };
   }
 
-  private async findPublishedResult(assessmentId: string, studentId: string): Promise<ReadonlyArray<ResultRow>> {
+  /**
+   * 253:8067 prints "Complete the exam successfully to earn N points" and
+   * 253:8647 "Well done! You've earned N points". N is the school's active
+   * earning rule for a published assessment result — null when the school has
+   * no active rule, never a fabricated default.
+   */
+  private async findAssessmentPointsAvailable(schoolId: string): Promise<number | null> {
+    const [rule] = await this.db.select({ points: pointEarningRules.points })
+      .from(pointEarningRules)
+      .where(and(
+        eq(pointEarningRules.schoolId, schoolId),
+        eq(pointEarningRules.code, assessmentResultPublishedRuleCode),
+        eq(pointEarningRules.isActive, true),
+      ))
+      .limit(1);
+    return rule?.points ?? null;
+  }
+
+  /**
+   * The points this student actually banked for this assessment. The ledger
+   * addresses a result row by id, so the join runs through public.exam_results
+   * and both sides stay school-scoped.
+   */
+  private async findAwardedAssessmentPoints(
+    schoolId: string,
+    assessmentId: string,
+    studentId: string,
+  ): Promise<number | null> {
+    const rows = await this.db.execute(sql`
+      select entry.points
+      from public.point_ledger_entries entry
+      join public.exam_results result
+        on result.id::text = entry.source_id
+       and result.school_id = entry.school_id
+      where entry.school_id = ${schoolId}::uuid
+        and entry.recipient_user_id = ${studentId}::uuid
+        and entry.source_type = 'assessment_result'
+        and entry.rule_code = ${assessmentResultPublishedRuleCode}
+        and result.assessment_id = ${assessmentId}::uuid
+        and result.student_id = ${studentId}::uuid
+        and result.published_at is not null
+      limit 1
+    `) as unknown as ReadonlyArray<{ points: number }>;
+    return rows[0]?.points ?? null;
+  }
+
+  private async findPublishedResult(assessmentId: string, studentId: string): Promise<{
+    result: ResultRow;
+    rubricSecuredMarks: Record<string, number> | null;
+  } | undefined> {
     const [base] = await this.db.select({
       feedback: examResults.feedback,
       id: examResults.id,
       marks: examResults.marks,
       publishedAt: examResults.publishedAt,
+      rubricSecuredMarks: examResults.rubricSecuredMarks,
       studentId: examResults.studentId,
       updatedAt: examResults.updatedAt,
     }).from(examResults).where(and(
@@ -1327,7 +1440,8 @@ export class DrizzleExamsRepository implements ExamsRepository {
       eq(examResults.studentId, studentId),
       isNotNull(examResults.publishedAt),
     )).limit(1);
-    if (base === undefined) return [];
+    if (base === undefined) return undefined;
+    const { rubricSecuredMarks, ...baseResult } = base;
     const [revision] = await this.db.select({
       feedback: examResultRevisions.feedback,
       id: examResultRevisions.id,
@@ -1343,7 +1457,12 @@ export class DrizzleExamsRepository implements ExamsRepository {
       desc(examResultRevisions.createdAt),
       desc(examResultRevisions.id),
     ).limit(1);
-    return revision === undefined ? [base] : [revision];
+    // A revision supersedes marks and feedback. The per-section breakdown is
+    // only ever recorded on the base row, so it survives a revision unchanged.
+    return {
+      result: revision ?? baseResult,
+      rubricSecuredMarks: rubricSecuredMarks ?? null,
+    };
   }
 
   private async findManagedAssessment(identity: ExamIdentity, assessmentId: string): Promise<StoredExamAssessment | undefined> {
@@ -1366,7 +1485,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
       this.teacherAssignmentForAssessment(identity),
       this.activeGroupForAssessment(identity),
     )).limit(1);
-    return assessment === undefined ? undefined : this.withDetails(assessment);
+    return assessment === undefined ? undefined : this.withDetails(assessment, identity);
   }
 
   private async findAssignableGroup(
