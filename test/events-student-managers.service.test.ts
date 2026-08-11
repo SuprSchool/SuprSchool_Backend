@@ -48,7 +48,7 @@ describe('student event managing-team hydration', () => {
       finalizeUpload: vi.fn(),
       prepareUpload: vi.fn(),
     };
-    const service = createEventsService({ files, repository });
+    const service = createEventsService({ avatarUrlSigner: { createSignedDownloadUrl: vi.fn() }, files, repository });
 
     await expect(service.getStudentEvent({ schoolId, userId: studentId }, eventId))
       .resolves.toMatchObject({ managingTeam });

@@ -28,6 +28,7 @@ import type {
 } from '../types/events.js';
 import type { EventsRepository, StoredEventResource } from '../db/repositories/events.repository.js';
 import { AppError } from '../lib/errors.js';
+import { logger, safeErrorMessage } from '../lib/logger.js';
 import { pointAwardRuleCodes, type PointAwardPort } from './point-award.service.js';
 
 export interface EventFilePort {
@@ -57,6 +58,15 @@ export interface EventFilePort {
 export interface EventAvatarUrlSigner {
   createSignedDownloadUrl(bucket: string, objectPath: string): Promise<string>;
 }
+
+/**
+ * Every uploaded avatar costs one storage round trip, and a school-audience
+ * event can carry hundreds of participants. Signing the page in one
+ * `Promise.all` would open that many simultaneous requests each time the
+ * leaderboard is viewed, which is precisely how a storage rate limit is
+ * tripped. The width is held fixed instead.
+ */
+const AVATAR_SIGNING_CONCURRENCY = 8;
 
 export interface EventsService {
   archiveEvent(identity: EventsIdentity, eventId: string): Promise<void>;
@@ -123,7 +133,7 @@ export interface EventsService {
 
 export function createEventsService(
   { avatarUrlSigner, files, repository, pointAwards }: {
-    avatarUrlSigner?: EventAvatarUrlSigner;
+    avatarUrlSigner: EventAvatarUrlSigner;
     files: EventFilePort;
     repository: EventsRepository;
     pointAwards?: PointAwardPort;
@@ -131,6 +141,10 @@ export function createEventsService(
 ): EventsService {
   if (files === undefined) throw new Error('Events service requires file storage');
   if (repository === undefined) throw new Error('Events service requires a repository');
+  // Left optional, a dropped wiring line would not fail — it would quietly
+  // return every participant without a photo, which reads as a design choice
+  // rather than a fault. Boot loudly instead.
+  if (avatarUrlSigner === undefined) throw new Error('Events service requires an avatar URL signer');
 
   function requireRepository(): EventsRepository {
     return repository;
@@ -189,18 +203,59 @@ export function createEventsService(
   }
 
   /**
+   * Signs one page of avatars at a bounded width and returns the URLs by object
+   * path. Paths are de-duplicated first: the participant listing joins
+   * `class_members`, so a student enrolled in two active classes arrives twice
+   * and would otherwise be signed twice.
+   *
    * A leaderboard is worth more than one avatar, so a path that will not sign —
-   * an object retired behind a stale profile row, or storage being unreachable —
-   * degrades that row to the initials disc instead of failing the whole list.
-   * The one thing never returned is a URL that would not load.
+   * an object retired behind a stale profile row, or storage refusing the
+   * request — leaves that row on the initials disc instead of failing the whole
+   * list. The one thing never returned is a URL that would not load. The
+   * degradation is logged once per request with a count, so a rate-limit storm
+   * is visible without turning one slow page into hundreds of log lines.
    */
-  async function signParticipantAvatar(objectPath: string | null): Promise<string | null> {
-    if (objectPath === null || avatarUrlSigner === undefined) return null;
-    try {
-      return await avatarUrlSigner.createSignedDownloadUrl('avatars', objectPath);
-    } catch {
-      return null;
+  async function signAvatarUrls(
+    objectPaths: readonly (string | null)[],
+  ): Promise<ReadonlyMap<string, string>> {
+    const pending = [...new Set(objectPaths.filter((path): path is string => path !== null))];
+    const signed = new Map<string, string>();
+    let failures = 0;
+    let firstFailedPath: string | undefined;
+    let firstError: unknown;
+    let cursor = 0;
+
+    // Each worker takes the next path and advances the cursor synchronously, so
+    // no two workers can claim the same one.
+    await Promise.all(Array.from(
+      { length: Math.min(AVATAR_SIGNING_CONCURRENCY, pending.length) },
+      async (): Promise<void> => {
+        while (cursor < pending.length) {
+          const objectPath = pending[cursor];
+          cursor += 1;
+          if (objectPath === undefined) continue;
+          try {
+            signed.set(objectPath, await avatarUrlSigner.createSignedDownloadUrl('avatars', objectPath));
+          } catch (error) {
+            failures += 1;
+            if (firstFailedPath === undefined) {
+              firstFailedPath = objectPath;
+              firstError = error;
+            }
+          }
+        }
+      },
+    ));
+
+    if (failures > 0) {
+      logger.warn({
+        avatarsRequested: pending.length,
+        errorMessage: safeErrorMessage(firstError),
+        failedCount: failures,
+        objectPath: firstFailedPath,
+      }, 'Event participant avatars could not be signed; those rows fall back to the initials disc');
     }
+    return signed;
   }
 
   async function requireStudentParticipants(identity: EventsIdentity, eventId: string): Promise<StudentEventParticipant[]> {
@@ -208,12 +263,13 @@ export function createEventsService(
     if (participants === undefined) {
       throw new AppError('NOT_FOUND', 404, 'Event not found');
     }
-    return Promise.all(participants.map(async (
+    const signedByObjectPath = await signAvatarUrls(participants.map((participant) => participant.avatarObjectPath));
+    return participants.map((
       { avatarObjectPath, ...participant }: StoredStudentEventParticipant,
-    ): Promise<StudentEventParticipant> => ({
+    ): StudentEventParticipant => ({
       ...participant,
-      avatarUrl: await signParticipantAvatar(avatarObjectPath),
-    })));
+      avatarUrl: avatarObjectPath === null ? null : signedByObjectPath.get(avatarObjectPath) ?? null,
+    }));
   }
 
   async function requireStudentTeams(identity: EventsIdentity, eventId: string): Promise<EventTeam[]> {
