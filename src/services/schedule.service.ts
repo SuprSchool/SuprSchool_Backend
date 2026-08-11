@@ -121,12 +121,18 @@ export function createScheduleService({ repository }: ScheduleServiceDependencie
       query: StudentAttendanceQuery,
     ): Promise<StudentAttendanceDetailResponse> {
       const range = attendanceRange(query);
-      const records = assertStudentResult(await repository.findStudentAttendance(
-        studentId,
-        schoolId,
-        range.startDate,
-        range.endDate,
-      ));
+      // The year series spans every academic year the student has attendance
+      // in, so it is independent of the requested period's range.
+      const [periodRecords, yearComparison] = await Promise.all([
+        repository.findStudentAttendance(
+          studentId,
+          schoolId,
+          range.startDate,
+          range.endDate,
+        ),
+        repository.findStudentAttendanceYearComparison(studentId, schoolId),
+      ]);
+      const records = assertStudentResult(periodRecords);
 
       return {
         period: query.period,
@@ -134,6 +140,7 @@ export function createScheduleService({ repository }: ScheduleServiceDependencie
         periodStartDate: range.startDate,
         records,
         summary: summarize(records),
+        yearComparison,
       };
     },
     async getTeacherTimetable(

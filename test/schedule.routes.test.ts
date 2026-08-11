@@ -11,9 +11,11 @@ import {
   DrizzleScheduleRepository,
   TIMETABLE_TIME_ZONE,
 } from '../src/db/repositories/schedule.repository.js';
+import type { ScheduleRepository } from '../src/db/repositories/schedule.repository.js';
 import type { AuthenticationMiddleware } from '../src/middleware/authenticate.js';
 import { createStudentScheduleRouter } from '../src/routes/student-schedule.routes.js';
 import { createTeacherScheduleRouter } from '../src/routes/teacher-schedule.routes.js';
+import { createScheduleService as createScheduleApplicationService } from '../src/services/schedule.service.js';
 import type { ScheduleService } from '../src/services/schedule.service.js';
 
 function createScheduleService(): ScheduleService {
@@ -68,6 +70,7 @@ describe('schedule routers', () => {
       periodStartDate: '2026-07-01',
       records: [],
       summary: { absent: 0, excused: 0, late: 0, present: 0, totalSessions: 0 },
+      yearComparison: [],
     });
     const app = express();
     app.use('/student', createStudentScheduleRouter(service, authenticateAs('student')));
@@ -83,6 +86,31 @@ describe('schedule routers', () => {
       'school-1',
       { month: '2026-07', period: 'monthly' },
     );
+  });
+
+  // `253:13058` draws one bar per academic year, oldest first.
+  it('returns one bar per academic year with data', async () => {
+    const service = createScheduleService();
+    vi.mocked(service.getStudentAttendance).mockResolvedValue({
+      period: 'yearly',
+      periodEndDate: '2025-12-31',
+      periodStartDate: '2025-01-01',
+      records: [],
+      summary: { absent: 0, excused: 0, late: 0, present: 0, totalSessions: 0 },
+      yearComparison: [
+        { percentage: 92.1, year: '2024' },
+        { percentage: 94.6, year: '2025' },
+      ],
+    });
+    const app = express();
+    app.use('/student', createStudentScheduleRouter(service, authenticateAs('student')));
+    app.use(errorHandler);
+
+    const response = await request(app).get('/student/attendance?period=yearly&year=2025');
+
+    expect(response.status).toBe(200);
+    expect(response.body.yearComparison).toHaveLength(2);
+    expect(response.body.yearComparison[1].year).toBe('2025');
   });
 
   it('rejects a missing period-specific attendance filter', async () => {
@@ -269,5 +297,104 @@ describe('timetable period labels', () => {
     // Filtering inside the CTE would renumber the day around one subject and
     // turn the day's 3rd period into that subject's 1st.
     expect(sql.indexOf('row_number')).toBeLessThan(sql.indexOf('day_slots.subject_id ='));
+  });
+});
+
+const yearStudentId = '77777777-7777-4777-8777-777777777777';
+
+function createScheduleRepository(
+  overrides: Partial<ScheduleRepository> = {},
+): ScheduleRepository {
+  return {
+    findClassPeriodLabel: vi.fn(),
+    findStudentAttendance: vi.fn().mockResolvedValue([]),
+    findStudentAttendanceYearComparison: vi.fn().mockResolvedValue([]),
+    findStudentTimetable: vi.fn(),
+    findTeacherAttendanceHistory: vi.fn(),
+    findTeacherPendingAttendance: vi.fn(),
+    findTeacherTimetable: vi.fn(),
+    ...overrides,
+  };
+}
+
+describe('year-over-year attendance', () => {
+  it('carries the per-year series on the student attendance response, oldest first', async () => {
+    const repository = createScheduleRepository({
+      findStudentAttendanceYearComparison: vi.fn().mockResolvedValue([
+        { percentage: 92.1, year: '2024' },
+        { percentage: 94.6, year: '2025' },
+      ]),
+    });
+    const service = createScheduleApplicationService({ repository });
+
+    const body = await service.getStudentAttendance(yearStudentId, periodSchoolId, {
+      period: 'yearly',
+      year: '2025',
+    });
+
+    expect(body.yearComparison).toEqual([
+      { percentage: 92.1, year: '2024' },
+      { percentage: 94.6, year: '2025' },
+    ]);
+    // Tenancy: the aggregate is scoped by the authenticated student's school.
+    expect(repository.findStudentAttendanceYearComparison).toHaveBeenCalledWith(
+      yearStudentId,
+      periodSchoolId,
+    );
+  });
+
+  it('returns only the years that have attendance, never a zero-filled year', async () => {
+    const repository = createScheduleRepository({
+      findStudentAttendanceYearComparison: vi.fn().mockResolvedValue([
+        { percentage: 94.6, year: '2025' },
+      ]),
+    });
+    const service = createScheduleApplicationService({ repository });
+
+    const body = await service.getStudentAttendance(yearStudentId, periodSchoolId, {
+      date: '2026-07-13',
+      period: 'daily',
+    });
+
+    expect(body.yearComparison).toEqual([{ percentage: 94.6, year: '2025' }]);
+  });
+
+  it('groups by academic year over the classes the student belonged to, school-scoped', async () => {
+    const { database, execute } = databaseReturning(() => []);
+
+    await new DrizzleScheduleRepository(database)
+      .findStudentAttendanceYearComparison(yearStudentId, periodSchoolId);
+
+    const { params, sql } = renderedQuery(execute.mock.calls[0]![0]);
+    expect(params).toContain(yearStudentId);
+    expect(params).toContain(periodSchoolId);
+    expect(sql).toContain('academic_years');
+    // The student changes class between years, so the enrolment row for each
+    // year — not the current class — decides which sessions count.
+    expect(sql).toContain('class_members');
+    // Matching the enrolment's own class as well would drop the earlier half of
+    // a mid-year transfer, whose sessions belong to a class the surviving
+    // membership row no longer names.
+    expect(sql).not.toContain('membership.class_id');
+    expect(sql).toContain('group by');
+    // Oldest first is the frame's left-to-right order.
+    expect(sql.indexOf('order by')).toBeLessThan(sql.indexOf('starts_on asc'));
+    // A left join would manufacture a zero bar for a year with no attendance.
+    expect(sql).not.toContain('left join');
+  });
+
+  it('reads the aggregate as a number even when the driver hands back numeric text', async () => {
+    const { database } = databaseReturning(() => [
+      { percentage: '92.1', year: '2023-2024' },
+      { percentage: '94.6', year: '2024-2025' },
+    ]);
+
+    await expect(
+      new DrizzleScheduleRepository(database)
+        .findStudentAttendanceYearComparison(yearStudentId, periodSchoolId),
+    ).resolves.toEqual([
+      { percentage: 92.1, year: '2023-2024' },
+      { percentage: 94.6, year: '2024-2025' },
+    ]);
   });
 });

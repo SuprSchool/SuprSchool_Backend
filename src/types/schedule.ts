@@ -86,10 +86,22 @@ export interface StudentAttendancePeriodSummary {
 
 export type StudentAttendancePeriod = 'daily' | 'monthly' | 'yearly';
 
+/**
+ * One bar of `253:13058` "Year-over-Year Comparison". `year` is the school's own
+ * `academic_years.name`, not a derived calendar year, so a school that names its
+ * years "2024-2025" gets that label rather than an invented one. A year the
+ * student has no attendance in is absent from the series — never a zero bar.
+ */
+export interface StudentAttendanceYearComparison {
+  percentage: number;
+  year: string;
+}
+
 export interface StudentAttendanceDetailResponse {
   period: StudentAttendancePeriod;
   periodEndDate: string;
   periodStartDate: string;
   records: StudentAttendanceDetailRecord[];
   summary: StudentAttendancePeriodSummary;
+  yearComparison: StudentAttendanceYearComparison[];
 }
