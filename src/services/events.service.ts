@@ -18,7 +18,9 @@ import type {
   EventsIdentity,
   PublishedEventResults,
   RegistrationResult,
+  StoredStudentEventParticipant,
   StudentEventDetail,
+  StudentEventParticipant,
   StudentEventsQuery,
   TeacherEventDetail,
   TeacherEventsQuery,
@@ -47,6 +49,15 @@ export interface EventFilePort {
   }): Promise<{ contentType: string; displayName: string; id: string; objectPath: string }>;
 }
 
+/**
+ * The read half of the avatar mechanism the profile and home services already
+ * use: object paths live in the `avatars` bucket and are only ever handed to a
+ * client as a short-lived signed URL.
+ */
+export interface EventAvatarUrlSigner {
+  createSignedDownloadUrl(bucket: string, objectPath: string): Promise<string>;
+}
+
 export interface EventsService {
   archiveEvent(identity: EventsIdentity, eventId: string): Promise<void>;
   createEvent(identity: EventsIdentity, eventId: string, input: CreateEventInput): Promise<TeacherEventDetail>;
@@ -60,7 +71,7 @@ export interface EventsService {
   getStudentTeam(identity: EventsIdentity, eventId: string, teamId: string): Promise<EventTeam>;
   getTeacherEvent(identity: EventsIdentity, eventId: string): Promise<TeacherEventDetail>;
   getTeacherResults(identity: EventsIdentity, eventId: string): Promise<EventResultsState>;
-  listStudentParticipants(identity: EventsIdentity, eventId: string): Promise<EventParticipant[]>;
+  listStudentParticipants(identity: EventsIdentity, eventId: string): Promise<StudentEventParticipant[]>;
   listStudentTeams(identity: EventsIdentity, eventId: string): Promise<EventTeam[]>;
   listParticipants(identity: EventsIdentity, eventId: string): Promise<EventParticipant[]>;
   listClassOptions(identity: EventsIdentity): Promise<{ items: EventClassOption[] }>;
@@ -111,7 +122,8 @@ export interface EventsService {
 }
 
 export function createEventsService(
-  { files, repository, pointAwards }: {
+  { avatarUrlSigner, files, repository, pointAwards }: {
+    avatarUrlSigner?: EventAvatarUrlSigner;
     files: EventFilePort;
     repository: EventsRepository;
     pointAwards?: PointAwardPort;
@@ -176,12 +188,32 @@ export function createEventsService(
     return team;
   }
 
-  async function requireStudentParticipants(identity: EventsIdentity, eventId: string): Promise<EventParticipant[]> {
+  /**
+   * A leaderboard is worth more than one avatar, so a path that will not sign —
+   * an object retired behind a stale profile row, or storage being unreachable —
+   * degrades that row to the initials disc instead of failing the whole list.
+   * The one thing never returned is a URL that would not load.
+   */
+  async function signParticipantAvatar(objectPath: string | null): Promise<string | null> {
+    if (objectPath === null || avatarUrlSigner === undefined) return null;
+    try {
+      return await avatarUrlSigner.createSignedDownloadUrl('avatars', objectPath);
+    } catch {
+      return null;
+    }
+  }
+
+  async function requireStudentParticipants(identity: EventsIdentity, eventId: string): Promise<StudentEventParticipant[]> {
     const participants = await requireRepository().listStudentParticipants(identity, eventId);
     if (participants === undefined) {
       throw new AppError('NOT_FOUND', 404, 'Event not found');
     }
-    return participants;
+    return Promise.all(participants.map(async (
+      { avatarObjectPath, ...participant }: StoredStudentEventParticipant,
+    ): Promise<StudentEventParticipant> => ({
+      ...participant,
+      avatarUrl: await signParticipantAvatar(avatarObjectPath),
+    })));
   }
 
   async function requireStudentTeams(identity: EventsIdentity, eventId: string): Promise<EventTeam[]> {

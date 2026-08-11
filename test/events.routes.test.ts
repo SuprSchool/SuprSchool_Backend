@@ -14,6 +14,7 @@ import {
 import { createStudentEventsRouter } from '../src/routes/student-events.routes.js';
 import { createTeacherEventsRouter } from '../src/routes/teacher-events.routes.js';
 import type { EventsService } from '../src/services/events.service.js';
+import type { StudentEventParticipant } from '../src/types/events.js';
 
 function createEventsService(): EventsService {
   return {
@@ -820,5 +821,75 @@ describe('event action contracts', () => {
       eventId,
       [{ id: teamId, memberStudentIds: [studentId], name: 'Sparta' }],
     );
+  });
+});
+
+describe('student event leaderboard participant data', () => {
+  const eventId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+  it('distinguishes points from score and ranks server-side', async () => {
+    const service = createEventsService();
+    const participants: StudentEventParticipant[] = [
+      {
+        avatarUrl: 'https://signed.example.test/asha.png',
+        className: '10-A',
+        participationTag: null,
+        rank: 1,
+        registeredAt: '2026-07-16T15:00:00.000000Z',
+        registrationId: '77777777-7777-4777-8777-777777777771',
+        score: 87,
+        studentId: '88888888-8888-4888-8888-888888888881',
+        studentName: 'Asha',
+        teamId: null,
+        teamName: null,
+      },
+      {
+        avatarUrl: null,
+        className: '10-A',
+        participationTag: null,
+        rank: 2,
+        registeredAt: '2026-07-16T15:05:00.000000Z',
+        registrationId: '77777777-7777-4777-8777-777777777772',
+        score: 84,
+        studentId: '88888888-8888-4888-8888-888888888882',
+        studentName: 'Ravi',
+        teamId: null,
+        teamName: null,
+      },
+    ];
+    const listStudentParticipants = vi.fn().mockResolvedValue(participants);
+    Object.assign(service, { listStudentParticipants });
+
+    const response = await request(createStudentApp(service)).get(`/student/events/${eventId}/participants`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.items[0].rank).toBe(1);
+    expect(response.body.items[0].score).toBe(87);
+    expect(response.body.items[1].avatarUrl).toBeNull();
+  });
+
+  it('reports an unranked participant as null rather than a fabricated zero', async () => {
+    const service = createEventsService();
+    const participants: StudentEventParticipant[] = [
+      {
+        avatarUrl: null,
+        className: '10-B',
+        participationTag: null,
+        rank: null,
+        registeredAt: '2026-07-16T15:10:00.000000Z',
+        registrationId: '77777777-7777-4777-8777-777777777773',
+        score: null,
+        studentId: '88888888-8888-4888-8888-888888888883',
+        studentName: 'Meera',
+        teamId: null,
+        teamName: null,
+      },
+    ];
+    Object.assign(service, { listStudentParticipants: vi.fn().mockResolvedValue(participants) });
+
+    const response = await request(createStudentApp(service)).get(`/student/events/${eventId}/participants`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.items[0]).toMatchObject({ avatarUrl: null, rank: null, score: null });
   });
 });

@@ -214,7 +214,18 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
       repository: diary,
     }),
     eventMetadataIdempotency: idempotency,
-    eventsService: createEventsService({ files, pointAwards, repository: events }),
+    eventsService: createEventsService({
+      avatarUrlSigner: {
+        createSignedDownloadUrl: (bucket, objectPath) => platform.storage.createSignedReadUrl(
+          bucket,
+          objectPath,
+          15 * 60,
+        ),
+      },
+      files,
+      pointAwards,
+      repository: events,
+    }),
     recordingsIdempotency: idempotency,
     recordingsService: createRecordingService({
       files: recordingFiles,

@@ -141,3 +141,87 @@ describe('events service', () => {
     ]);
   });
 });
+
+describe('student event participant avatars', () => {
+  function storedParticipant(overrides: Record<string, unknown>) {
+    return {
+      className: '10-A',
+      participationTag: null,
+      rank: null,
+      registeredAt: '2026-07-16T15:00:00.000000Z',
+      registrationId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      score: null,
+      studentId,
+      studentName: 'Asha',
+      teamId: null,
+      teamName: null,
+      ...overrides,
+    };
+  }
+
+  it('signs an uploaded avatar on read and leaves an absent one null', async () => {
+    const repository = {
+      listStudentParticipants: vi.fn().mockResolvedValue([
+        storedParticipant({ avatarObjectPath: 'school/asha.png', rank: 1, score: 87 }),
+        storedParticipant({ avatarObjectPath: null, rank: 2, score: 84, studentName: 'Ravi' }),
+      ]),
+    } as unknown as EventsRepository;
+    const createSignedDownloadUrl = vi.fn().mockResolvedValue('https://signed.example.test/asha.png');
+    const service = createEventsService({
+      avatarUrlSigner: { createSignedDownloadUrl },
+      files: eventFiles(),
+      repository,
+    });
+
+    const participants = await service.listStudentParticipants({ schoolId, userId: studentId }, eventId);
+
+    expect(participants[0]?.avatarUrl).toBe('https://signed.example.test/asha.png');
+    expect(participants[1]?.avatarUrl).toBeNull();
+    expect(createSignedDownloadUrl).toHaveBeenCalledTimes(1);
+    expect(createSignedDownloadUrl).toHaveBeenCalledWith('avatars', 'school/asha.png');
+  });
+
+  it('never leaks the object path a signed URL was built from', async () => {
+    const repository = {
+      listStudentParticipants: vi.fn().mockResolvedValue([
+        storedParticipant({ avatarObjectPath: 'school/asha.png' }),
+      ]),
+    } as unknown as EventsRepository;
+    const service = createEventsService({
+      avatarUrlSigner: { createSignedDownloadUrl: vi.fn().mockResolvedValue('https://signed.example.test/asha.png') },
+      files: eventFiles(),
+      repository,
+    });
+
+    const participants = await service.listStudentParticipants({ schoolId, userId: studentId }, eventId);
+
+    expect(participants[0]).not.toHaveProperty('avatarObjectPath');
+  });
+
+  it('falls back to no avatar rather than a broken URL when signing fails', async () => {
+    const repository = {
+      listStudentParticipants: vi.fn().mockResolvedValue([
+        storedParticipant({ avatarObjectPath: 'school/missing.png', rank: 1, score: 87 }),
+      ]),
+    } as unknown as EventsRepository;
+    const service = createEventsService({
+      avatarUrlSigner: { createSignedDownloadUrl: vi.fn().mockRejectedValue(new Error('object missing')) },
+      files: eventFiles(),
+      repository,
+    });
+
+    const participants = await service.listStudentParticipants({ schoolId, userId: studentId }, eventId);
+
+    expect(participants[0]).toMatchObject({ avatarUrl: null, rank: 1, score: 87 });
+  });
+
+  it('raises the event not-found error when the student cannot see the event', async () => {
+    const repository = {
+      listStudentParticipants: vi.fn().mockResolvedValue(undefined),
+    } as unknown as EventsRepository;
+    const service = createEventsService({ files: eventFiles(), repository });
+
+    await expect(service.listStudentParticipants({ schoolId, userId: studentId }, eventId))
+      .rejects.toMatchObject({ code: 'NOT_FOUND', status: 404 } satisfies Partial<AppError>);
+  });
+});
