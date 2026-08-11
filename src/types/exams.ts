@@ -96,6 +96,13 @@ export interface ExamAssessment {
   scheduledOn: string;
   startsAt: string;
   subjectId: string;
+  /**
+   * The subject's display name. 253:5844 prints it under the exam title
+   * ("Calculus Final" over "Maths"), and clients have no other source for it on
+   * this payload — without it the card falls back to the raw subject id and
+   * renders a UUID at the user.
+   */
+  subjectName?: string | undefined;
   isPublished?: boolean | undefined;
   resultsPublished?: boolean | undefined;
   syllabus?: string | undefined;

@@ -134,6 +134,7 @@ type AssessmentRow = {
   scheduledOn: string;
   startsAt: string | null;
   subjectId: string;
+  subjectName?: string | null;
   syllabus: string | null;
   title: string;
 };
@@ -167,10 +168,26 @@ function toAssessment(row: AssessmentRow): ExamAssessment | undefined {
     scheduledOn: row.scheduledOn,
     startsAt: row.startsAt,
     subjectId: row.subjectId,
+    ...(row.subjectName ? { subjectName: row.subjectName } : {}),
     ...(row.syllabus === null ? {} : { syllabus: row.syllabus }),
     title: row.title,
   };
 }
+
+/**
+ * The subject's display name, read beside the assessment.
+ *
+ * A correlated subquery rather than a join: these selects are spread across
+ * four call sites with different shapes, and the name is a single scalar.
+ * `class_exams.subject_id` references `subjects.id` and `name` is not null, so
+ * this reads null only for a subject filed under another school.
+ */
+const assessmentSubjectName = sql<string>`(
+  select subject.name
+  from public.subjects subject
+  where subject.id = "class_exams"."subject_id"
+    and subject.school_id = "class_exams"."school_id"
+)`;
 
 /**
  * Mirrors `pointAwardRuleCodes.assessmentResultPublished`. Repeated rather than
@@ -299,6 +316,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
       scheduledOn: classExams.scheduledOn,
       startsAt: classExams.startsAt,
       subjectId: classExams.subjectId,
+      subjectName: assessmentSubjectName,
       syllabus: classExams.syllabus,
       title: classExams.title,
     }).from(classExams).where(and(
@@ -447,6 +465,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
       scheduledOn: classExams.scheduledOn,
       startsAt: classExams.startsAt,
       subjectId: classExams.subjectId,
+      subjectName: assessmentSubjectName,
       syllabus: classExams.syllabus,
       isPublished: classExams.isPublished,
       resultsPublished: sql<boolean>`exists (
@@ -1329,6 +1348,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
       scheduledOn: classExams.scheduledOn,
       startsAt: classExams.startsAt,
       subjectId: classExams.subjectId,
+      subjectName: assessmentSubjectName,
       syllabus: classExams.syllabus,
       title: classExams.title,
     }).from(classExams).where(and(
@@ -1492,6 +1512,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
       scheduledOn: classExams.scheduledOn,
       startsAt: classExams.startsAt,
       subjectId: classExams.subjectId,
+      subjectName: assessmentSubjectName,
       syllabus: classExams.syllabus,
       title: classExams.title,
     }).from(classExams).where(and(

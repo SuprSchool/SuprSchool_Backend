@@ -1053,6 +1053,7 @@ describe('teacher assessment roster counts', () => {
       '2026-08-12',       // scheduledOn
       '09:00',            // startsAt
       subjectRouteId,     // subjectId
+      'Mathematics',      // subjectName — the card prints this, not the id
       null,               // syllabus
       true,               // isPublished
       false,              // resultsPublished
@@ -1211,6 +1212,7 @@ describe('subject exam detail sections', () => {
         return { rows: [[
           'class-1', '12:00', groupRouteId, assessmentRouteId, 25, '2026-08-12', '10:00',
           subjectRouteId,
+          'English',
           'The Little Girl\nThe Road Not Taken\n\n  The Lost Child  ',
           'English - Literature',
         ]] };
@@ -1252,6 +1254,10 @@ describe('subject exam detail sections', () => {
     );
 
     expect(detail.examGroupId).toBe(groupRouteId);
+    // 253:5844 prints the subject under the title ("Calculus Final" over
+    // "Maths"). Without a name on the payload the card falls back to the id and
+    // shows a UUID at the student.
+    expect(detail.subjectName).toBe('English');
     expect(detail.syllabusTopics).toEqual([
       'The Little Girl', 'The Road Not Taken', 'The Lost Child',
     ]);
