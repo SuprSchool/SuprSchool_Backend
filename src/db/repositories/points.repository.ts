@@ -51,10 +51,14 @@ interface PointActivityRow {
  * a trailing 7 or 30 days. A trailing window under a calendar label reads as a
  * bug the first time a Monday drops Sunday's points.
  *
+ * Postgres truncates a week to ISO-8601 — Monday 00:00 — which is also what
+ * the dropdown's "This Week" means in the schools this ships to.
+ *
  * `date_trunc` resolves against the session TimeZone, which is UTC here. No
  * school timezone is stored, so a school far from UTC sees its week and month
- * turn over at a UTC boundary rather than a local midnight. Filed on
- * docs/parity/SHARED-REQUESTS.md beside the other timezone rows.
+ * turn over at a UTC boundary rather than a local midnight. Filed in the
+ * client repo (SuprSchool) at docs/parity/SHARED-REQUESTS.md, beside the other
+ * timezone rows.
  */
 function periodWindow(period: PointActivityPeriod) {
   if (period === 'week') return sql`ledger.occurred_at >= date_trunc('week', now())`;

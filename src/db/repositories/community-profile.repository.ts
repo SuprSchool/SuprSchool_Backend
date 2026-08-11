@@ -325,7 +325,8 @@ export class DrizzleCommunityProfileRepository implements CommunityProfileReposi
    * tab even though the student may register for it. `isEligible` below does
    * honour `audience_type = 'school'`, because it mirrors the registration
    * predicate — so the two can disagree for exactly those events. Filed as an
-   * open backend-contract row in docs/parity/SHARED-REQUESTS.md.
+   * open backend-contract row in the client repo (SuprSchool) at
+   * docs/parity/SHARED-REQUESTS.md.
    *
    * `isEligible` applies the same predicate `registerStudent` enforces —
    * unarchived, registration still open, and the audience covers the caller —
