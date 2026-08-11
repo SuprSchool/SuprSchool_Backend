@@ -1,6 +1,9 @@
 import type { CommunityProfileRepository } from '../db/repositories/community-profile.repository.js';
 import { AppError } from '../lib/errors.js';
-import { CURRENT_SCHOOL_GALLERY_PAGE_SIZE } from '../types/community-profile.js';
+import {
+  CURRENT_SCHOOL_EVENT_PAGE_SIZE,
+  CURRENT_SCHOOL_GALLERY_PAGE_SIZE,
+} from '../types/community-profile.js';
 import type {
   AssessmentSummaryReader,
   CommunityIdentity,
@@ -13,6 +16,8 @@ import type {
 } from '../types/community-profile.js';
 
 export const SCHOOL_GALLERY_BUCKET = 'school-gallery';
+/** Event banners live with the rest of the event resources the events service signs. */
+export const SCHOOL_EVENT_IMAGE_BUCKET = 'academic-files';
 export const SCHOOL_ASSET_URL_TTL_SECONDS = 300;
 
 export interface CommunityProfileService {
@@ -109,7 +114,7 @@ export function createCommunityProfileService(
           school.id,
           school.logoPath,
         );
-      const [gallery, events] = await Promise.all([
+      const [gallery, eventRecords] = await Promise.all([
         // The repository selects a stable first page. Keep a defensive bound
         // here too, so an implementation cannot turn one request into
         // unbounded private-URL signing work.
@@ -125,6 +130,28 @@ export function createCommunityProfileService(
         }))),
         dependencies.eventSummaryReader.listVisible(identity),
       ]);
+      // Bounded here as well as in the query, so an implementation cannot turn
+      // one school read into unbounded banner-signing work.
+      const events = await Promise.all(eventRecords
+        .slice(0, CURRENT_SCHOOL_EVENT_PAGE_SIZE)
+        .map(async (event) => ({
+          additionalCategoryCount: event.additionalCategoryCount,
+          category: event.category,
+          date: event.date,
+          id: event.id,
+          // Never a broken URL: an event with no confirmed banner says so.
+          imageUrl: event.imageObjectPath === null
+            ? null
+            : await signSchoolAsset(
+              dependencies.schoolAssetUrlSigner,
+              school.id,
+              event.imageObjectPath,
+              SCHOOL_EVENT_IMAGE_BUCKET,
+            ),
+          isEligible: event.isEligible,
+          registeredCount: event.registeredCount,
+          title: event.title,
+        })));
 
       return {
         address: school.address,
@@ -134,10 +161,12 @@ export function createCommunityProfileService(
         id: school.id,
         ...(logoUrl === undefined ? {} : { logoUrl }),
         name: school.name,
+        phone: school.phone,
         rating: school.rating,
         rules: school.rules,
         rulesIntro: school.rulesIntro,
         studentCount: school.studentCount,
+        supportEmail: school.supportEmail,
         teacherCount: school.teacherCount,
       };
     },
@@ -170,12 +199,15 @@ async function signSchoolAsset(
   signer: SchoolAssetUrlSigner,
   schoolId: string,
   objectPath: string,
+  bucket: string = SCHOOL_GALLERY_BUCKET,
 ): Promise<string> {
+  // Every storage object path is rooted at its own school. Signing one that is
+  // not would hand a caller a URL into another tenant's bucket.
   if (!objectPath.startsWith(`${schoolId}/`)) {
-    throw new AppError('INTERNAL_ERROR', 500, 'School logo has an invalid object path');
+    throw new AppError('INTERNAL_ERROR', 500, `School asset in ${bucket} has an invalid object path`);
   }
   return signer.createSignedDownloadUrl(
-    SCHOOL_GALLERY_BUCKET,
+    bucket,
     objectPath,
     SCHOOL_ASSET_URL_TTL_SECONDS,
   );

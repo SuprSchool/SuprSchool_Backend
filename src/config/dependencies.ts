@@ -133,7 +133,15 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
   const communityReaders = createCommunityReaders(db);
   const communityProfileService = createCommunityProfileService({
     assessmentSummaryReader: communityReaders,
-    eventSummaryReader: communityReaders,
+    eventSummaryReader: {
+      countConducted: (schoolId, teacherId) => communityReaders.countConducted(schoolId, teacherId),
+      countParticipated: (schoolId, studentId) => (
+        communityReaders.countParticipated(schoolId, studentId)
+      ),
+      // The visible-events query lives with the rest of the community SQL now
+      // that the card carries a banner, a registration count and eligibility.
+      listVisible: (identity) => community.findVisibleSchoolEvents(identity),
+    },
     repository: community,
     schoolAssetUrlSigner: {
       createSignedDownloadUrl: (bucket, objectPath, expiresInSeconds) =>
@@ -336,39 +344,6 @@ function createCommunityReaders(database: Database) {
         classRank: row?.classRank === null || row?.classRank === undefined ? null : Number(row.classRank),
         points: Number(row?.points ?? 0),
       };
-    },
-    async listVisible(identity: { role: "student" | "teacher"; schoolId: string; userId: string }) {
-      const rows = await database.execute(sql<{ category: string; date: string; id: string; title: string }>`
-        select
-          coalesce(event.category, event.activity_kind) as category,
-          to_char(event.starts_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as date,
-          event.id,
-          event.title
-        from public.events event
-        where event.school_id = ${identity.schoolId}::uuid
-          and event.lifecycle = 'published'
-          and event.deleted_at is null
-          and (
-             ${identity.role} = 'teacher'
-            or exists (
-              select 1
-              from public.event_audiences audience
-              join public.class_members membership
-                on membership.school_id = audience.school_id
-               and membership.class_id = audience.class_id
-               and membership.student_id = ${identity.userId}::uuid
-               and membership.is_active
-              join public.academic_years year
-                on year.id = membership.academic_year_id
-               and year.school_id = membership.school_id
-               and year.is_current
-              where audience.event_id = event.id and audience.school_id = event.school_id
-            )
-          )
-        order by event.starts_at desc, event.id desc
-        limit 24
-      `);
-      return rows as unknown as readonly { category: string; date: string; id: string; title: string }[];
     },
   };
 }

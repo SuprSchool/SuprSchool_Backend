@@ -22,6 +22,10 @@ export const schoolProfiles = pgTable('school_profiles', {
   rulesIntro: text('rules_intro').notNull().default(''),
   rules: text('rules').array().notNull().default(sql`'{}'::text[]`),
   logoPath: text('logo_path'),
+  /** Settings › Call School Office (758:4541). Null when the school published none. */
+  phone: text('phone'),
+  /** Settings › Email Support (758:4541). Null when the school published none. */
+  supportEmail: text('support_email'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

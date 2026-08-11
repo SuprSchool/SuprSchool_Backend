@@ -14,8 +14,10 @@ import {
 import { schoolGalleryItems, schoolProfiles } from '../schema/community-school.js';
 import { classAnnouncements } from '../schema/student-home.js';
 import {
+  CURRENT_SCHOOL_EVENT_PAGE_SIZE,
   CURRENT_SCHOOL_GALLERY_PAGE_SIZE,
   type CommunityIdentity,
+  type SchoolEventSummaryRecord,
 } from '../../types/community-profile.js';
 
 export interface StudentOverviewRecord {
@@ -53,10 +55,12 @@ export interface SchoolContentRecord {
   id: string;
   logoPath: string | null;
   name: string;
+  phone: string | null;
   rating: string;
   rules: readonly string[];
   rulesIntro: string;
   studentCount: number;
+  supportEmail: string | null;
   teacherCount: number;
 }
 
@@ -64,6 +68,20 @@ export interface CommunityProfileRepository {
   findCurrentSchool(identity: CommunityIdentity): Promise<SchoolContentRecord | null>;
   findStudentOverview(identity: CommunityIdentity, now: Date): Promise<StudentOverviewRecord | null>;
   findTeacherOverview(identity: CommunityIdentity, now: Date): Promise<TeacherOverviewRecord | null>;
+  findVisibleSchoolEvents(
+    identity: CommunityIdentity,
+  ): Promise<readonly SchoolEventSummaryRecord[]>;
+}
+
+interface SchoolEventRow {
+  additionalCategoryCount: number | string;
+  category: string;
+  date: string;
+  id: string;
+  imageObjectPath: string | null;
+  isEligible: boolean | string;
+  registeredCount: number | string;
+  title: string;
 }
 
 interface AttendanceRow {
@@ -236,9 +254,11 @@ export class DrizzleCommunityProfileRepository implements CommunityProfileReposi
         id: schools.id,
         logoPath: schoolProfiles.logoPath,
         name: schools.name,
+        phone: schoolProfiles.phone,
         rating: schoolProfiles.rating,
         rules: schoolProfiles.rules,
         rulesIntro: schoolProfiles.rulesIntro,
+        supportEmail: schoolProfiles.supportEmail,
       })
       .from(schools)
       .innerJoin(
@@ -282,12 +302,132 @@ export class DrizzleCommunityProfileRepository implements CommunityProfileReposi
       id: school.id,
       logoPath: school.logoPath,
       name: school.name,
+      // A school with no profile row, or one that published no contact detail,
+      // reports null — the Settings rows hide rather than draw a blank chevron.
+      phone: school.phone ?? null,
       rating: school.rating ?? '—',
       rules: school.rules ?? [],
       rulesIntro: school.rulesIntro ?? '',
       studentCount: counts.studentCount,
+      supportEmail: school.supportEmail ?? null,
       teacherCount: counts.teacherCount,
     };
+  }
+
+  /**
+   * The school payload's Events tab (`253:15008`). Visibility is unchanged from
+   * the reader this replaced; the card fields are new.
+   *
+   * That inherited visibility carries a known gap, left in place deliberately
+   * rather than widened inside a payload change: for a student the `where`
+   * clause admits an event only through an `event_audiences` row, so an event
+   * with `audience_type = 'school'` and no audience rows is invisible on this
+   * tab even though the student may register for it. `isEligible` below does
+   * honour `audience_type = 'school'`, because it mirrors the registration
+   * predicate — so the two can disagree for exactly those events. Filed as an
+   * open backend-contract row in the client repo (SuprSchool) at
+   * docs/parity/SHARED-REQUESTS.md.
+   *
+   * `isEligible` applies the same predicate `registerStudent` enforces —
+   * unarchived, registration still open, and the audience covers the caller —
+   * so the chip cannot promise a registration the write path would refuse. A
+   * teacher never registers, and the teacher school payload draws no
+   * eligibility chip, so teachers read `true`.
+   */
+  public async findVisibleSchoolEvents(
+    identity: CommunityIdentity,
+  ): Promise<readonly SchoolEventSummaryRecord[]> {
+    const result = await this.db.execute(sql<SchoolEventRow>`
+      select
+        coalesce(event.category, event.activity_kind) as category,
+        to_char(event.starts_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as date,
+        event.id,
+        event.title,
+        banner.object_path as "imageObjectPath",
+        coalesce(registration_total.total, 0)::int as "registeredCount",
+        (
+          case when event.category is not null then 1 else 0 end
+          + case when event.participation_mode is not null then 1 else 0 end
+        )::int as "additionalCategoryCount",
+        (
+          ${identity.role}::text = 'teacher'
+          or (
+            event.archived_at is null
+            and (
+              event.registration_deadline_at is null
+              or event.registration_deadline_at >= now()
+            )
+            and (
+              event.audience_type = 'school'
+              or exists (
+                select 1
+                from public.event_audiences audience
+                join public.class_members membership
+                  on membership.school_id = audience.school_id
+                 and membership.class_id = audience.class_id
+                 and membership.student_id = ${identity.userId}::uuid
+                 and membership.is_active
+                join public.academic_years year
+                  on year.id = membership.academic_year_id
+                 and year.school_id = membership.school_id
+                 and year.is_current
+                where audience.event_id = event.id and audience.school_id = event.school_id
+              )
+            )
+          )
+        ) as "isEligible"
+      from public.events event
+      left join lateral (
+        select resource.object_path
+        from public.event_resources resource
+        where resource.event_id = event.id
+          and resource.school_id = event.school_id
+          and resource.resource_kind = 'banner'
+          and resource.confirmed_at is not null
+        order by resource.sort_order, resource.created_at, resource.id
+        limit 1
+      ) banner on true
+      left join lateral (
+        select count(*)::int as total
+        from public.event_registrations registration
+        where registration.event_id = event.id
+          and registration.school_id = event.school_id
+          and registration.cancelled_at is null
+      ) registration_total on true
+      where event.school_id = ${identity.schoolId}::uuid
+        and event.lifecycle = 'published'
+        and event.deleted_at is null
+        and (
+           ${identity.role}::text = 'teacher'
+          or exists (
+            select 1
+            from public.event_audiences audience
+            join public.class_members membership
+              on membership.school_id = audience.school_id
+             and membership.class_id = audience.class_id
+             and membership.student_id = ${identity.userId}::uuid
+             and membership.is_active
+            join public.academic_years year
+              on year.id = membership.academic_year_id
+             and year.school_id = membership.school_id
+             and year.is_current
+            where audience.event_id = event.id and audience.school_id = event.school_id
+          )
+        )
+      order by event.starts_at desc, event.id desc
+      limit ${CURRENT_SCHOOL_EVENT_PAGE_SIZE}
+    `);
+
+    return (result as unknown as readonly SchoolEventRow[]).map((row) => ({
+      additionalCategoryCount: Number(row.additionalCategoryCount ?? 0),
+      category: row.category,
+      date: row.date,
+      id: row.id,
+      imageObjectPath: row.imageObjectPath ?? null,
+      isEligible: readBoolean(row.isEligible),
+      registeredCount: Number(row.registeredCount ?? 0),
+      title: row.title,
+    }));
   }
 
   private async getAttendance(
@@ -382,6 +522,15 @@ export class DrizzleCommunityProfileRepository implements CommunityProfileReposi
       teacherCount: Number(row?.teacherCount ?? 0),
     };
   }
+}
+
+/**
+ * Raw `execute` bypasses Drizzle's column decoding, so a boolean can arrive as
+ * the driver's own representation. Reading it as `=== true` would silently turn
+ * an eligible student into an ineligible one.
+ */
+function readBoolean(value: boolean | string): boolean {
+  return value === true || value === 't' || value === 'true';
 }
 
 function summarizeAttendance(rows: readonly AttendanceRow[]): {

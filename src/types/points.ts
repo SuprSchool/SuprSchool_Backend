@@ -57,6 +57,15 @@ export interface PointAwardResult {
   entryId?: string;
 }
 
+export const pointActivityPeriodValues = ['week', 'month', 'all'] as const;
+
+/**
+ * The My Points period dropdown (`761:4817`) selects a window. It is a query
+ * parameter in its own right — reading it out of `cursor` made one parameter
+ * carry two unrelated settings, so every period returned the same page.
+ */
+export type PointActivityPeriod = (typeof pointActivityPeriodValues)[number];
+
 export interface PointActivityCursor {
   id: string;
   occurredAt: string;
@@ -65,6 +74,7 @@ export interface PointActivityCursor {
 export interface PointCursorPage {
   cursor?: PointActivityCursor;
   limit: number;
+  period: PointActivityPeriod;
 }
 
 export interface PointActivityRecord {

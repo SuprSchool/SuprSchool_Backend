@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import type { PointActivityCursor } from '../types/points.js';
+import { pointActivityPeriodValues, type PointActivityCursor } from '../types/points.js';
 
 const pointCursorSchema = z.object({
   id: z.uuid(),
@@ -23,6 +23,9 @@ const encodedPointCursorSchema = z.string().min(1).transform((value, context) =>
 export const pointsActivityQuerySchema = z.object({
   cursor: encodedPointCursorSchema.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
+  // `761:4817` offers exactly three windows. An unlisted one is a client bug,
+  // not a reason to silently widen the read to all time.
+  period: z.enum(pointActivityPeriodValues).default('all'),
 }).strict();
 
 export function encodePointsCursor(cursor: PointActivityCursor): string {

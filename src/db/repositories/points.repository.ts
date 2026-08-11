@@ -1,5 +1,6 @@
 import type {
   PointActivityPage,
+  PointActivityPeriod,
   PointAwardInsert,
   PointCursorPage,
   PointEarningRule,
@@ -38,6 +39,31 @@ interface PointActivityRow {
   ruleCode: string;
   ruleIcon: PointEarningRule['icon'];
   ruleLabel: string;
+}
+
+/**
+ * The window `761:4817` selects. It narrows the same school- and user-scoped
+ * query the cursor pages through — the two never share a parameter, so paging
+ * inside a week cannot silently reset the window.
+ *
+ * Both bounded windows are calendar-based, because the dropdown labels them
+ * that way: "This Week" and "This Month" name the current week and month, not
+ * a trailing 7 or 30 days. A trailing window under a calendar label reads as a
+ * bug the first time a Monday drops Sunday's points.
+ *
+ * Postgres truncates a week to ISO-8601 — Monday 00:00 — which is also what
+ * the dropdown's "This Week" means in the schools this ships to.
+ *
+ * `date_trunc` resolves against the session TimeZone, which is UTC here. No
+ * school timezone is stored, so a school far from UTC sees its week and month
+ * turn over at a UTC boundary rather than a local midnight. Filed in the
+ * client repo (SuprSchool) at docs/parity/SHARED-REQUESTS.md, beside the other
+ * timezone rows.
+ */
+function periodWindow(period: PointActivityPeriod) {
+  if (period === 'week') return sql`ledger.occurred_at >= date_trunc('week', now())`;
+  if (period === 'month') return sql`ledger.occurred_at >= date_trunc('month', now())`;
+  return sql`true`;
 }
 
 
@@ -177,6 +203,7 @@ export class DrizzlePointsRepository implements PointsRepository {
        and rule.code = ledger.rule_code
       where ledger.school_id = ${identity.schoolId}::uuid
         and ledger.recipient_user_id = ${identity.userId}::uuid
+        and ${periodWindow(page.period)}
         and (
           ${page.cursor?.occurredAt ?? null}::timestamptz is null
           or (ledger.occurred_at, ledger.id) < (
