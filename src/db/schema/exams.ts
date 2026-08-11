@@ -6,6 +6,7 @@ import {
   doublePrecision,
   index,
   integer,
+  jsonb,
   pgTable,
   text,
   time,
@@ -141,12 +142,22 @@ export const examResults = pgTable(
     enteredByTeacherId: uuid('entered_by_teacher_id').notNull().references(() => userProfiles.id, { onDelete: 'restrict' }),
     marks: doublePrecision('marks').notNull(),
     feedback: text('feedback'),
+    /**
+     * Per-section secured marks keyed by `exam_rubrics.position` (253:8504
+     * prints "20/25 Marks"). Null until evaluation records it — the grading
+     * write path stores a single total mark and has no per-section input yet.
+     */
+    rubricSecuredMarks: jsonb('rubric_secured_marks').$type<Record<string, number>>(),
     publishedAt: timestamp('published_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
     check('exam_results_marks_check', sql`${table.marks} >= 0`),
+    check(
+      'exam_results_rubric_secured_marks_check',
+      sql`${table.rubricSecuredMarks} is null or jsonb_typeof(${table.rubricSecuredMarks}) = 'object'`,
+    ),
     unique('exam_results_assessment_student_unique').on(table.assessmentId, table.studentId),
     index('exam_results_assessment_cursor_idx').on(
       table.assessmentId,

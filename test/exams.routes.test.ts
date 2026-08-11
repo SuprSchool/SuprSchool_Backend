@@ -175,14 +175,23 @@ describe('exams router', () => {
     const service = createService();
     const detail = {
       endsAt: '10:00',
+      // The teacher's copy carries no student, so the two personal figures and
+      // the result-derived fields stay null.
+      evaluatedDate: null,
+      examGroupId: groupRouteId,
+      feedback: null,
+      gradingRubric: [{ section: 'Working', securedMarks: null, totalMarks: 100 }],
       id: assessmentRouteId,
       maxMarks: 100,
+      pointsAvailable: 25,
+      pointsEarned: null,
       resources: [],
       rubrics: [{ description: 'Complete working', marks: 100, position: 1, sectionTitle: 'Working' }],
       scheduledOn: '2026-08-12',
       startsAt: '09:00',
       subjectId: subjectRouteId,
       syllabus: 'Algebra and geometry',
+      syllabusTopics: ['Algebra and geometry'],
       title: 'Mathematics Test',
     };
     vi.mocked(service.getAssessmentForTeacher).mockResolvedValue(detail);
@@ -1131,5 +1140,179 @@ describe('teacher assessment roster counts', () => {
 
     expect(page.items[0]?.totalStudents).toBe(0);
     expect(page.items[0]?.submissionCount).toBe(0);
+  });
+});
+
+describe('subject exam detail sections', () => {
+  /** Every section empty — the shape a freshly published, ungraded exam returns. */
+  const ungradedDetail = {
+    endsAt: '12:00',
+    evaluatedDate: null,
+    examGroupId: groupRouteId,
+    feedback: null,
+    gradingRubric: null,
+    id: assessmentRouteId,
+    maxMarks: 25,
+    pointsAvailable: null,
+    pointsEarned: null,
+    resources: [],
+    rubrics: [],
+    scheduledOn: '2026-08-12',
+    startsAt: '10:00',
+    subjectId: subjectRouteId,
+    syllabusTopics: null,
+    title: 'English - Literature',
+  };
+
+  it('returns the exam detail sections with nulls where grading has not filled them', async () => {
+    const service = createService();
+    vi.mocked(service.getAssessmentForStudent).mockResolvedValue({
+      ...ungradedDetail,
+      gradingRubric: [{ section: 'Grammar', securedMarks: 20, totalMarks: 25 }],
+      pointsAvailable: 25,
+      syllabusTopics: ['Algebra', 'Geometry'],
+    });
+    const studentApp = createTestApp(service, { role: 'student', userId: studentId });
+
+    const response = await request(studentApp)
+      .get(`/student/exam-assessments/${assessmentRouteId}`)
+      .expect(200);
+
+    expect(response.body.examGroupId).toBe(groupRouteId);
+    expect(response.body.gradingRubric[0].securedMarks).toBe(20);
+    expect(response.body.pointsEarned).toBeNull();
+    expect(response.body.evaluatedDate).toBeNull();
+    expect(response.body.feedback).toBeNull();
+    expect(service.getAssessmentForStudent).toHaveBeenCalledWith(
+      { schoolId, userId: studentId }, assessmentRouteId,
+    );
+  });
+
+  it('keeps an absent section null rather than an empty stand-in', async () => {
+    const service = createService();
+    vi.mocked(service.getAssessmentForStudent).mockResolvedValue(ungradedDetail);
+    const studentApp = createTestApp(service, { role: 'student', userId: studentId });
+
+    const response = await request(studentApp)
+      .get(`/student/exam-assessments/${assessmentRouteId}`)
+      .expect(200);
+
+    expect(response.body.gradingRubric).toBeNull();
+    expect(response.body.syllabusTopics).toBeNull();
+    expect(response.body.pointsAvailable).toBeNull();
+    expect(response.body.evaluatedDate).toBeNull();
+  });
+
+  it('derives every section from what the grading pipeline stores', async () => {
+    const evaluatedAt = '2026-08-18T09:30:00.000Z';
+    const callback: RemoteCallback = async (query) => {
+      // Builder selects arrive positionally; raw db.execute rows do not.
+      if (query.includes('from "class_exams"')) {
+        return { rows: [[
+          'class-1', '12:00', groupRouteId, assessmentRouteId, 25, '2026-08-12', '10:00',
+          subjectRouteId,
+          'The Little Girl\nThe Road Not Taken\n\n  The Lost Child  ',
+          'English - Literature',
+        ]] };
+      }
+      if (query.includes('from "exam_rubrics"')) {
+        return { rows: [
+          ['Close reading', 25, 1, 'Grammar'],
+          ['Unseen passage', 10, 2, 'Comprehension'],
+          ['Discursive essay', 5, 3, 'Composition'],
+        ] };
+      }
+      if (query.includes('from "exam_resources"')) {
+        return { rows: [['resource-1', 'Attachment.pdf', 'exam/resource-1.pdf']] };
+      }
+      if (query.includes('from "exam_result_revisions"')) return { rows: [] };
+      if (query.includes('from "exam_results"')) {
+        // Section 3's value is a string: jsonb accepts it, and it must not
+        // reach the client as a number.
+        return { rows: [[
+          'Strong analysis', 'result-1', 20, evaluatedAt, { '1': 20, '3': 'twenty' },
+          studentId, evaluatedAt,
+        ]] };
+      }
+      if (query.includes('from "point_earning_rules"')) return { rows: [[25]] };
+      if (query.includes('point_ledger_entries')) return { rows: [{ points: 25 }] };
+      return { rows: [] };
+    };
+    const service = createExamsService({
+      files: {
+        createReadUrl: async () => 'https://storage.test/attachment.pdf',
+      } as never,
+      mutations: passthroughMutations(),
+      outbox: { write: vi.fn(), writeInTransaction: vi.fn() },
+      repository: new DrizzleExamsRepository(drizzle(callback) as unknown as Database),
+    });
+
+    const detail = await service.getAssessmentForStudent(
+      { schoolId, userId: studentId }, assessmentRouteId,
+    );
+
+    expect(detail.examGroupId).toBe(groupRouteId);
+    expect(detail.syllabusTopics).toEqual([
+      'The Little Girl', 'The Road Not Taken', 'The Lost Child',
+    ]);
+    // Section one has a stored breakdown; section two has none; section three
+    // has a non-numeric one, which is not a secured mark and must not print as
+    // "twenty/25 Marks".
+    expect(detail.gradingRubric).toEqual([
+      { section: 'Grammar', securedMarks: 20, totalMarks: 25 },
+      { section: 'Comprehension', securedMarks: null, totalMarks: 10 },
+      { section: 'Composition', securedMarks: null, totalMarks: 5 },
+    ]);
+    expect(detail.evaluatedDate).toBe(evaluatedAt);
+    expect(detail.feedback).toBe('Strong analysis');
+    expect(detail.pointsAvailable).toBe(25);
+    expect(detail.pointsEarned).toBe(25);
+    expect(detail.resources).toEqual([
+      { id: 'resource-1', name: 'Attachment.pdf', signedUrl: 'https://storage.test/attachment.pdf' },
+    ]);
+  });
+
+  it('never lends one student the points or secured marks of another', async () => {
+    const queries: string[] = [];
+    const callback: RemoteCallback = async (query) => {
+      queries.push(query);
+      if (query.includes('from "class_exams"')) {
+        return { rows: [[
+          'class-1', '12:00', groupRouteId, assessmentRouteId, 25, '2026-08-12', '10:00',
+          subjectRouteId, null, 'English - Literature',
+        ]] };
+      }
+      if (query.includes('from "exam_rubrics"')) {
+        return { rows: [['Close reading', 25, 1, 'Grammar']] };
+      }
+      return { rows: [] };
+    };
+    const repository = new DrizzleExamsRepository(drizzle(callback) as unknown as Database);
+
+    const teacherView = await repository.findAssessmentForTeacher(examIdentity, assessmentRouteId);
+
+    // The teacher read carries no student, so both personal figures stay null
+    // and the rubric prints its totals with no secured half.
+    expect(teacherView?.pointsEarned).toBeNull();
+    expect(teacherView?.gradingRubric).toEqual([
+      { section: 'Grammar', securedMarks: null, totalMarks: 25 },
+    ]);
+    expect(queries.some((query) => query.includes('point_ledger_entries'))).toBe(false);
+    // The available-points rule is school data, and it is read school-scoped.
+    expect(queries.some((query) => query.includes('from "point_earning_rules"'))).toBe(true);
+  });
+
+  it('gives per-section secured marks a per-student home', () => {
+    const source = readFileSync(
+      new URL('../supabase/migrations/20260810090000_exam_rubric_secured_marks.sql', import.meta.url),
+      'utf8',
+    );
+
+    // exam_rubrics is keyed (assessment_id, position) — one row per section for
+    // the whole class — so the breakdown belongs on the per-student result row.
+    expect(source).toContain('alter table public.exam_results');
+    expect(source).toContain('add column if not exists rubric_secured_marks jsonb');
+    expect(source).not.toContain('alter table public.exam_rubrics');
+    expect(source).toContain('comment on column public.exam_results.rubric_secured_marks');
   });
 });

@@ -176,12 +176,16 @@ export function createExamsService({
     };
   }
 
+  /**
+   * `classId` stays internal. `groupId` does not: View Leaderboard on 253:8647
+   * routes through the exam group, so it reaches the wire as `examGroupId`.
+   */
   async function toAssessment(stored: StoredExamAssessment): Promise<ExamAssessmentDetail> {
-    const { classId: _classId, groupId: _groupId, resources, ...assessment } = stored;
+    const { classId: _classId, groupId, resources, ...assessment } = stored;
     void _classId;
-    void _groupId;
     return {
       ...assessment,
+      examGroupId: groupId,
       resources: await Promise.all(resources.map(toResource)),
     };
   }
