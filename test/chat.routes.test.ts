@@ -710,4 +710,52 @@ describe('chat REST API', () => {
     expect(quotaChecked).toBe(false);
     expect(inserted).toBe(false);
   });
+
+  /**
+   * The insert is the third thing that can fail after the claim is taken, and it
+   * has to behave like the other two: a rate-limit rejection and a rejected
+   * attachment session both release the claim. Without the release the key stays
+   * `in_progress` until its lease expires, so the client's automatic retry — same
+   * key, same durable `clientMessageId` — is answered 409 rather than being
+   * allowed to insert. A transient database error would wedge the message.
+   */
+  it('releases the idempotency claim when the message insert fails', async () => {
+    let releaseCalls = 0;
+    const service = createChatService({
+      cache: {
+        delete: async () => undefined,
+        get: async () => null,
+        set: async () => undefined,
+        withLock: async (_key, _ttl, work) => work(),
+      } as CacheStore,
+      files: {} as ChatAttachmentFilePort,
+      idempotency: {
+        claim: async () => ({ state: 'new' as const }),
+        complete: async () => undefined,
+        release: async () => { releaseCalls += 1; },
+      } as unknown as IdempotencyStore,
+      repository: {
+        assertAccess: async () => ({
+          classId: '00000000-0000-4000-8000-000000000301',
+          id: roomId,
+          kind: 'class' as const,
+          schoolId,
+          subjectId: null,
+          userId: studentId,
+        }),
+        findMessageByClientId: async () => undefined,
+        insertMessage: async () => { throw new Error('insert failed'); },
+      } as unknown as ChatRepository,
+      typingPublisher: {} as ChatTypingPublisher,
+    });
+
+    await expect(service.sendMessage(
+      { role: 'student', schoolId, userId: studentId },
+      roomId,
+      '00000000-0000-4000-8000-000000000181',
+      input('00000000-0000-4000-8000-000000000182'),
+    )).rejects.toThrow('insert failed');
+
+    expect(releaseCalls).toBe(1);
+  });
 });

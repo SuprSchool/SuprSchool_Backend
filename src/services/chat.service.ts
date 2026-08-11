@@ -197,11 +197,19 @@ export function createChatService({
             throw error;
           }
         }
-        stored = await repository.insertMessage(access, {
-          body: input.body,
-          clientMessageId: input.clientMessageId,
-          ...(attachment === undefined ? {} : { attachment }),
-        });
+        // Same contract as the two rejections above: a failed insert releases the
+        // claim so the client's retry with the same key can insert, instead of
+        // being told the request is still in progress until the lease expires.
+        try {
+          stored = await repository.insertMessage(access, {
+            body: input.body,
+            clientMessageId: input.clientMessageId,
+            ...(attachment === undefined ? {} : { attachment }),
+          });
+        } catch (error) {
+          await idempotency.release(request);
+          throw error;
+        }
       }
       const message = await toMessage(stored);
       await idempotency.complete(request, { body: message, status: 201 });
