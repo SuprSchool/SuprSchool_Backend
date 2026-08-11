@@ -3,6 +3,32 @@ import { z } from 'zod';
 export const devicePlatformValues = ['ios', 'android'] as const;
 export type DevicePlatform = (typeof devicePlatformValues)[number];
 
+/**
+ * The card glyph on Figma frame `268:9469` follows the category, not the event
+ * type: `assignment.graded` and `exam.results_published` are one card ("Grade
+ * Updated", the medal), while a school notice and a cancelled class share the
+ * bell. Producers therefore name a category rather than let the client infer
+ * one from `notificationType`.
+ *
+ * `birthday` and `event-registration` are the frame's cake and people cards.
+ * Nothing produces them yet — declaring them is what makes the glyphs
+ * reachable once something does.
+ */
+export const notificationCategoryValues = [
+  'school',
+  'class',
+  'assignment',
+  'exam',
+  'birthday',
+  'event-registration',
+  'grade-update',
+] as const;
+
+export type NotificationCategory = (typeof notificationCategoryValues)[number];
+
+/** The column default, and the glyph an unrecognised category falls back to. */
+export const defaultNotificationCategory: NotificationCategory = 'school';
+
 export const registerDeviceTokenSchema = z.object({
   expoPushToken: z.string().min(1).max(255),
   platform: z.enum(devicePlatformValues),
@@ -13,6 +39,12 @@ export type RegisterDeviceTokenInput = z.infer<typeof registerDeviceTokenSchema>
 export interface NotificationInboxItem {
   id: string;
   notificationType: string;
+  /**
+   * Read as plain text, not as `NotificationCategory`: the column accepts any
+   * value, and a row written by a newer producer must survive an older read
+   * rather than fail to parse. Unknown values render the default glyph.
+   */
+  category: string;
   title: string;
   body: string;
   data: Record<string, unknown>;

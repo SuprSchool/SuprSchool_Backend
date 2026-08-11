@@ -40,7 +40,7 @@ export class DrizzleNotificationRepository implements NotificationRepository, No
 
   async listInbox(schoolId: string, userId: string, options: { cursor?: NotificationInboxCursor | undefined; limit: number; unreadOnly: boolean }): Promise<NotificationInboxPage> {
     const rows = await this.db.execute(sql<NotificationInboxItem>`
-      select id, notification_type as "notificationType", title, body, data,
+      select id, notification_type as "notificationType", category, title, body, data,
              read_at as "readAt", to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as "createdAt"
       from public.notification_inbox
       where school_id = ${schoolId}::uuid and user_id = ${userId}::uuid
