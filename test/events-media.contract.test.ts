@@ -189,7 +189,7 @@ describe('event resource service lifecycle', () => {
         objectPath: stored.objectPath,
       }),
     };
-    const service = createEventsService({ files: files as never, repository });
+    const service = createEventsService({ avatarUrlSigner: { createSignedDownloadUrl: vi.fn() }, files: files as never, repository });
 
     await expect((service as never as { confirmResourceUpload(identity: { schoolId: string; userId: string }, eventId: string, sessionId: string): Promise<unknown> })
       .confirmResourceUpload({ schoolId, userId: teacherId }, eventId, sessionId))
@@ -219,7 +219,7 @@ describe('event resource service lifecycle', () => {
     const files = {
       deleteObject: vi.fn().mockResolvedValue(undefined),
     };
-    const service = createEventsService({ files: files as never, repository });
+    const service = createEventsService({ avatarUrlSigner: { createSignedDownloadUrl: vi.fn() }, files: files as never, repository });
 
     await expect(service.deleteResource({ schoolId, userId: teacherId }, eventId, resourceId))
       .resolves.toBeUndefined();
@@ -284,7 +284,7 @@ describe('event detail resource signing', () => {
     const files = {
       createReadUrl: vi.fn(),
     };
-    const service = createEventsService({ files: files as never, repository });
+    const service = createEventsService({ avatarUrlSigner: { createSignedDownloadUrl: vi.fn() }, files: files as never, repository });
 
     await expect(service.getTeacherEvent({ schoolId, userId: teacherId }, eventId))
       .rejects.toMatchObject({ code: 'NOT_FOUND', status: 404 });
@@ -316,7 +316,7 @@ describe('event detail resource signing', () => {
     const files = {
       createReadUrl: vi.fn().mockImplementation(async (_bucket: string, objectPath: string) => `https://storage.example/${objectPath}`),
     };
-    const service = createEventsService({ files: files as never, repository });
+    const service = createEventsService({ avatarUrlSigner: { createSignedDownloadUrl: vi.fn() }, files: files as never, repository });
 
     const detail = await service.getTeacherEvent({ schoolId, userId: teacherId }, eventId);
 

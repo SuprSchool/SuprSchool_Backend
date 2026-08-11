@@ -459,3 +459,94 @@ describe('DrizzleEventsRepository lifecycle, authorization, and outbox guarantee
     )))).toBe(true);
   });
 });
+
+describe('student event participant standings', () => {
+  function participantDatabase(
+    participantRows: Record<string, unknown>[],
+  ): RecordingDatabase {
+    // The visibility check the listing runs first also selects `from
+    // public.events event`, which any prefix of `public.events e` matches, so
+    // the listing is identified by its own standings CTE instead.
+    return new RecordingDatabase((query) => (
+      query.sql.includes('with standings as') ? participantRows : [{ id: eventId }]
+    ));
+  }
+
+  function participantQuery(database: RecordingDatabase): RecordedQuery {
+    const query = database.queries.find((candidate) => (
+      candidate.sql.includes('from public.event_registrations registration')
+    ));
+    if (query === undefined) throw new Error('participant listing query was not issued');
+    return query;
+  }
+
+  it('derives the rank in the listing query instead of reading the stored one', async () => {
+    const database = participantDatabase([]);
+    const repository = new DrizzleEventsRepository(database.asDatabase());
+
+    await repository.listStudentParticipants({ schoolId, userId: studentId }, eventId);
+
+    const { sql: statement } = participantQuery(database);
+    expect(statement).toContain('dense_rank() over (order by result.score desc nulls last)');
+    // The stored column is what publication freezes; the read path must not
+    // serve it, or a re-score would hand students a rank for a withdrawn result.
+    expect(statement).not.toContain('result.dense_rank');
+  });
+
+  it('withholds score and rank until the results are published', async () => {
+    const database = participantDatabase([]);
+    const repository = new DrizzleEventsRepository(database.asDatabase());
+
+    await repository.listStudentParticipants({ schoolId, userId: studentId }, eventId);
+
+    expect(participantQuery(database).sql).toContain('results_published_at is not null');
+  });
+
+  it('scopes the standings to the requesting school and reads the avatar only when one was uploaded', async () => {
+    const database = participantDatabase([]);
+    const repository = new DrizzleEventsRepository(database.asDatabase());
+
+    await repository.listStudentParticipants({ schoolId, userId: studentId }, eventId);
+
+    const query = participantQuery(database);
+    expect(query.params.filter((parameter) => parameter === schoolId).length).toBeGreaterThanOrEqual(2);
+    expect(query.sql).toContain("profile.avatar_kind = 'upload'");
+  });
+
+  it('returns a numeric score and a null standing for a participant without a result', async () => {
+    const database = participantDatabase([
+      {
+        avatarObjectPath: 'school/asha.png',
+        className: '10-A',
+        participationTag: null,
+        rank: 1,
+        registeredAt: '2026-07-16T15:00:00.000000Z',
+        registrationId: memberA,
+        score: '87.5',
+        studentId,
+        studentName: 'Asha',
+        teamId: null,
+        teamName: null,
+      },
+      {
+        avatarObjectPath: null,
+        className: '10-B',
+        participationTag: null,
+        rank: null,
+        registeredAt: '2026-07-16T15:10:00.000000Z',
+        registrationId: memberB,
+        score: null,
+        studentId: teacherId,
+        studentName: 'Meera',
+        teamId: null,
+        teamName: null,
+      },
+    ]);
+    const repository = new DrizzleEventsRepository(database.asDatabase());
+
+    const participants = await repository.listStudentParticipants({ schoolId, userId: studentId }, eventId);
+
+    expect(participants?.[0]).toMatchObject({ avatarObjectPath: 'school/asha.png', rank: 1, score: 87.5 });
+    expect(participants?.[1]).toMatchObject({ avatarObjectPath: null, rank: null, score: null });
+  });
+});

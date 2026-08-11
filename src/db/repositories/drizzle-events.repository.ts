@@ -23,6 +23,7 @@ import type {
   EventsIdentity,
   PublishedEventResults,
   RegistrationResult,
+  StoredStudentEventParticipant,
   StudentEventSummary,
   StudentEventsQuery,
   TeacherEventsQuery,
@@ -67,8 +68,28 @@ interface RegistrationRow {
   teamName: string | null;
 }
 
+/**
+ * `numeric` and `bigint` arrive as strings over the wire, so the standing is
+ * read as text and narrowed once, in one place, before it leaves the repository.
+ */
+type ParticipantRow = Omit<StoredStudentEventParticipant, 'rank' | 'score'> & {
+  rank: number | string | null;
+  score: string | null;
+};
+
 function rows<T>(result: unknown): T[] {
   return result as T[];
+}
+
+/**
+ * A standing that is absent stays absent. Coercing a missing column would turn
+ * "not scored" into `NaN`, which serializes as `null` anyway but only after
+ * passing through arithmetic as a number.
+ */
+function toStandingNumber(value: number | string | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function forbid(message: string): never {
@@ -713,17 +734,35 @@ export class DrizzleEventsRepository implements EventsRepository {
     return { entries: entries.map((entry) => ({ ...entry, score: entry.score === null ? null : Number(entry.score) })), publishedAt: event.publishedAt, revision: event.revision };
   }
 
-  public async listStudentParticipants(identity: EventsIdentity, eventId: string): Promise<EventParticipant[] | undefined> {
+  public async listStudentParticipants(identity: EventsIdentity, eventId: string): Promise<StoredStudentEventParticipant[] | undefined> {
     if (await this.getStudentEvent(identity, eventId) === undefined) return undefined;
-    return rows<EventParticipant>(await this.db.execute(sql`
+    // `standings` mirrors what publication freezes into `dense_rank` — same
+    // ordering, same null-score guard, same unfiltered window over the event's
+    // entries — so this list and the results endpoint cannot disagree about a
+    // tie. It is derived per read rather than selected from the stored column:
+    // re-scoring clears publication, and a rank that outlived its result would
+    // be a number nothing backs.
+    const participants = rows<ParticipantRow>(await this.db.execute(sql`
+      with standings as (
+        select result.registration_id as "registrationId", result.score,
+          case when result.score is null then null
+            else dense_rank() over (order by result.score desc nulls last) end as rank
+        from public.event_result_entries result
+        join public.events published on published.id = result.event_id and published.school_id = result.school_id
+        where result.event_id = ${eventId}::uuid and result.school_id = ${identity.schoolId}::uuid
+          and published.results_published_at is not null
+      )
       select registration.id as "registrationId", registration.student_id as "studentId", profile.display_name as "studentName", class_section.display_name as "className",
-        registration.participation_tag as "participationTag", to_char(registration.registered_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "registeredAt", member.team_id as "teamId", team.name as "teamName"
+        registration.participation_tag as "participationTag", to_char(registration.registered_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "registeredAt", member.team_id as "teamId", team.name as "teamName",
+        standing.score::text as "score", standing.rank::int as "rank",
+        case when profile.avatar_kind = 'upload' then coalesce(profile.avatar_value, profile.avatar_path) end as "avatarObjectPath"
       from public.event_registrations registration
       join public.user_profiles profile on profile.id = registration.student_id and profile.school_id = registration.school_id
       join public.class_members membership on membership.student_id = registration.student_id and membership.school_id = registration.school_id and membership.is_active = true
       join public.classes class_section on class_section.id = membership.class_id and class_section.school_id = membership.school_id
       left join public.event_team_members member on member.event_id = registration.event_id and member.student_id = registration.student_id
       left join public.event_teams team on team.id = member.team_id
+      left join standings standing on standing."registrationId" = registration.id
       where registration.event_id = ${eventId}::uuid and registration.school_id = ${identity.schoolId}::uuid and registration.cancelled_at is null
         and exists (
           select 1 from public.events event
@@ -739,6 +778,11 @@ export class DrizzleEventsRepository implements EventsRepository {
         )
       order by profile.display_name, registration.student_id
     `));
+    return participants.map((participant) => ({
+      ...participant,
+      rank: toStandingNumber(participant.rank),
+      score: toStandingNumber(participant.score),
+    }));
   }
 
   public async listStudentTeams(identity: EventsIdentity, eventId: string): Promise<EventTeam[] | undefined> {

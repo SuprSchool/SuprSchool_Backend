@@ -226,6 +226,33 @@ export interface EventParticipant {
   teamName: string | null;
 }
 
+/**
+ * The student leaderboard row (`253:7757`). It carries the standing on top of
+ * the registration, which the teacher roster has no use for.
+ *
+ * `score` is the event result — deliberately distinct from the points balance a
+ * student accumulates school-wide, which the two frames print side by side.
+ * `rank` is derived in the listing query from the scores that are visible at
+ * read time and is never persisted on the participant; a participant with no
+ * published result has no standing, so both are null rather than zero.
+ */
+export interface StudentEventParticipant extends EventParticipant {
+  avatarUrl: string | null;
+  rank: number | null;
+  score: number | null;
+}
+
+/**
+ * What the repository returns: the avatar object path, which only the service
+ * can turn into a signed URL. Never serialize this — an object path is not
+ * reachable by a client.
+ */
+export interface StoredStudentEventParticipant extends EventParticipant {
+  avatarObjectPath: string | null;
+  rank: number | null;
+  score: number | null;
+}
+
 export interface EventScoreInput {
   score: number | null;
   targetId: string;

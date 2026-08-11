@@ -15,6 +15,7 @@ import type {
   EventsIdentity,
   PublishedEventResults,
   RegistrationResult,
+  StoredStudentEventParticipant,
   StudentEventDetail,
   StudentEventsQuery,
   TeacherEventDetail,
@@ -55,7 +56,7 @@ export interface EventsRepository {
   getStudentTeam(identity: EventsIdentity, eventId: string, teamId: string): Promise<EventTeam | undefined>;
   getTeacherEvent(identity: EventsIdentity, eventId: string): Promise<StoredTeacherEventDetail | undefined>;
   getTeacherResults(identity: EventsIdentity, eventId: string): Promise<EventResultsState>;
-  listStudentParticipants(identity: EventsIdentity, eventId: string): Promise<EventParticipant[] | undefined>;
+  listStudentParticipants(identity: EventsIdentity, eventId: string): Promise<StoredStudentEventParticipant[] | undefined>;
   listStudentManagingTeam(identity: EventsIdentity, eventId: string): Promise<EventManagingMember[]>;
   listStudentTeams(identity: EventsIdentity, eventId: string): Promise<EventTeam[] | undefined>;
   listParticipants(identity: EventsIdentity, eventId: string): Promise<EventParticipant[]>;

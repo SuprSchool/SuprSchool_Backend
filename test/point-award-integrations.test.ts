@@ -181,6 +181,7 @@ describe('production point awards', () => {
       prepareUpload: vi.fn(),
     };
     const service = createEventsService({
+      avatarUrlSigner: { createSignedDownloadUrl: vi.fn() },
       files,
       repository,
       pointAwards: { awardIfAbsent },
