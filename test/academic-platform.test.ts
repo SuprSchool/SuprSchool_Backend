@@ -898,6 +898,7 @@ describe('academic cache degradation', () => {
     expect(listForStudent).toHaveBeenCalledOnce();
 
     const assignment = {
+      assignedAt: '2026-07-25T09:30:00.000Z',
       dueAt: '2026-08-01T00:00:00.000Z', gradingType: 'Numeric', id: assignmentId,
       instructions: 'Read the chapter', isGradedAssignment: false, maxMarks: 10,
       resources: [], rubrics: [], subjectId: 'subject-1', title: 'Homework',
@@ -957,7 +958,8 @@ describe('academic cache authorization and invalidation', () => {
       get: vi.fn().mockResolvedValue(JSON.stringify({
         audienceClassIds: ['class-revoked'],
         page: { items: [{ id: assignmentId }] },
-        version: 1,
+        // Current shape, so the audience mismatch is what forces the read.
+        version: 2,
       })),
       invalidateStudentAssignments: vi.fn(),
       set: vi.fn(),
@@ -981,6 +983,61 @@ describe('academic cache authorization and invalidation', () => {
     expect(listActiveClassIdsForStudent).toHaveBeenCalledWith({ schoolId, userId: studentId });
     expect(cache.get).toHaveBeenCalledAfter(listActiveClassIdsForStudent as never);
     expect(listForStudent).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a cached assignment page written before assignedAt joined the item shape', async () => {
+    const cache = {
+      get: vi.fn().mockResolvedValue(JSON.stringify({
+        audienceClassIds: ['class-current'],
+        // Audience matches and the entry is well-formed; only the shape is old.
+        page: { items: [{ dueAt: '2026-08-01T00:00:00.000Z', id: assignmentId }] },
+        version: 1,
+      })),
+      invalidateStudentAssignments: vi.fn(),
+      set: vi.fn(),
+    };
+    const listForStudent = vi.fn().mockResolvedValue({ items: [] });
+    const service = createAssignmentsService({
+      cache,
+      files: {} as never,
+      mutations: { execute: vi.fn() },
+      outbox: { write: vi.fn(), writeInTransaction: vi.fn() },
+      repository: {
+        listActiveClassIdsForStudent: vi.fn().mockResolvedValue(['class-current']),
+        listForStudent,
+      } as unknown as AssignmentsRepository,
+    });
+
+    // Serving it would hand the client an item missing a field the contract
+    // declares as always present.
+    await expect(service.listForStudent({ schoolId, userId: studentId }, { limit: 20 }))
+      .resolves.toEqual({ items: [] });
+    expect(listForStudent).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a cached assignment detail written before assignedAt existed', async () => {
+    const stored = {
+      assignedAt: '2026-07-25T09:30:00.000Z',
+      classId: 'class-1', displayCode: null, dueAt: '2026-08-01T00:00:00.000Z',
+      gradingType: 'Numeric' as const, id: assignmentId, instructions: 'Read the chapter',
+      isGradedAssignment: false, maxMarks: 10, resources: [], rubrics: [],
+      subjectId: 'subject-1', title: 'Homework',
+    };
+    const findForStudent = vi.fn().mockResolvedValue(stored);
+    const service = createAssignmentsService({
+      cache: {
+        get: vi.fn().mockResolvedValue(JSON.stringify({ ...stored, assignedAt: undefined })),
+        invalidateStudentAssignments: vi.fn(),
+        set: vi.fn(),
+      },
+      files: {} as never,
+      mutations: { execute: vi.fn() },
+      outbox: { write: vi.fn(), writeInTransaction: vi.fn() },
+      repository: { findForStudent } as unknown as AssignmentsRepository,
+    });
+
+    await expect(service.getForStudent({ schoolId, userId: studentId }, assignmentId))
+      .resolves.toMatchObject({ assignedAt: '2026-07-25T09:30:00.000Z' });
   });
 
   it('uses distinct canonical cache keys for subject, status, limit, and cursor variants', async () => {
