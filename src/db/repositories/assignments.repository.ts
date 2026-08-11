@@ -12,7 +12,7 @@ import {
 } from 'drizzle-orm';
 
 import type { Database } from '../client.js';
-import { classMembers, classSubjects, subjects } from '../schema/core.js';
+import { classMembers, classSubjects, subjects, userProfiles } from '../schema/core.js';
 import {
   assignmentResources,
   assignmentRubrics,
@@ -219,6 +219,7 @@ type SubmissionRow = {
   marks: number | null;
   objectPath: string | null;
   studentId: string;
+  studentName: string;
   submittedAt: Date | null;
 };
 
@@ -260,9 +261,27 @@ function toStoredSubmission(row: SubmissionRow): StoredSubmission {
     ...(row.marks === null ? {} : { marks: row.marks }),
     ...(row.objectPath === null ? {} : { objectPath: row.objectPath }),
     studentId: row.studentId,
+    studentName: row.studentName,
     ...(row.submittedAt === null ? {} : { submittedAt: row.submittedAt.toISOString() }),
   };
 }
+
+/**
+ * The submitting student's display name, read beside the submission row.
+ *
+ * A correlated subquery rather than a join, for the mutations whose shape has no
+ * room for one — an `update … returning` and two statements inside the confirm
+ * transaction. `assignment_submissions.student_id` is a foreign key to
+ * `user_profiles.id` and `display_name` is not null, so the only way this reads
+ * null is a profile filed under a different school than the submission, which is
+ * cross-tenant corruption rather than a state to render.
+ */
+const submissionStudentName = sql<string>`(
+  select profile.display_name
+  from public.user_profiles profile
+  where profile.id = "assignment_submissions"."student_id"
+    and profile.school_id = "assignment_submissions"."school_id"
+)`;
 
 export class DrizzleAssignmentsRepository implements AssignmentsRepository {
   public constructor(private readonly db: Database) {}
@@ -704,6 +723,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         id: string;
         marks: number | null;
         object_path: string | null;
+        studentName: string;
         student_id: string;
         submitted_at: Date | null;
         upload_session_id: string | null;
@@ -718,7 +738,8 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           marks,
           feedback,
           graded_at,
-          completed_at
+          completed_at,
+          ${submissionStudentName} as "studentName"
         from public.assignment_submissions
         where school_id = ${input.identity.schoolId}::uuid
           and assignment_id = ${input.assignmentId}::uuid
@@ -733,6 +754,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         id: string;
         marks: number | null;
         object_path: string | null;
+        studentName: string;
         student_id: string;
         submitted_at: Date | null;
         upload_session_id: string | null;
@@ -748,6 +770,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           marks: locked.marks,
           objectPath: locked.object_path,
           studentId: locked.student_id,
+          studentName: locked.studentName,
           submittedAt: locked.submitted_at,
         });
         return locked.upload_session_id === input.uploadSessionId
@@ -763,6 +786,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         id: string;
         marks: number | null;
         object_path: string | null;
+        studentName: string;
         student_id: string;
         submitted_at: Date | null;
       }>`
@@ -797,7 +821,8 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           marks,
           feedback,
           graded_at,
-          completed_at
+          completed_at,
+          ${submissionStudentName} as "studentName"
       `);
       const updated = (updatedRows as unknown as ReadonlyArray<{
         assignment_id: string;
@@ -807,6 +832,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         id: string;
         marks: number | null;
         object_path: string | null;
+        studentName: string;
         student_id: string;
         submitted_at: Date | null;
       }>)[0];
@@ -819,6 +845,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         marks: updated.marks,
         objectPath: updated.object_path,
         studentId: updated.student_id,
+        studentName: updated.studentName,
         submittedAt: updated.submitted_at,
       }) };
     });
@@ -842,12 +869,20 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         objectPath: assignmentSubmissions.objectPath,
         schoolId: assignmentSubmissions.schoolId,
         studentId: assignmentSubmissions.studentId,
+        studentName: userProfiles.displayName,
         submittedAt: assignmentSubmissions.submittedAt,
       })
       .from(assignmentSubmissions)
       .innerJoin(assignments, and(
         eq(assignments.id, assignmentSubmissions.assignmentId),
         eq(assignments.schoolId, assignmentSubmissions.schoolId),
+      ))
+      // The name the roster row, the search box and the footer print. Joined on
+      // the tenant as well as the student key, so a profile from another school
+      // can never name a submission in this one.
+      .innerJoin(userProfiles, and(
+        eq(userProfiles.id, assignmentSubmissions.studentId),
+        eq(userProfiles.schoolId, assignmentSubmissions.schoolId),
       ))
       .where(and(
         eq(assignmentSubmissions.schoolId, identity.schoolId),
@@ -938,6 +973,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         marks: assignmentSubmissions.marks,
         objectPath: assignmentSubmissions.objectPath,
         studentId: assignmentSubmissions.studentId,
+        studentName: submissionStudentName,
         submittedAt: assignmentSubmissions.submittedAt,
       });
     return updated === undefined ? undefined : toStoredSubmission(updated);
@@ -1124,9 +1160,16 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     assignmentId: string,
     uploadSessionId: string,
   ): Promise<StoredSubmission | undefined> {
+    // Every column is aliased, because `toStoredSubmission` reads camelCase and
+    // `execute` returns the driver's own labels: unaliased columns arrived as
+    // `assignment_id`/`graded_at`/… and read `undefined`, so the mapper threw on
+    // `row.gradedAt.toISOString()` for every row it found and this recovery
+    // could never succeed. Only `completed_at` had been aliased.
     const rows = await this.db.execute(sql<SubmissionRow>`
-      select submission.id, submission.assignment_id, submission.student_id, submission.object_path,
-        submission.submitted_at, submission.marks, submission.feedback, submission.graded_at,
+      select submission.id, submission.assignment_id as "assignmentId",
+        submission.student_id as "studentId", profile.display_name as "studentName",
+        submission.object_path as "objectPath", submission.submitted_at as "submittedAt",
+        submission.marks, submission.feedback, submission.graded_at as "gradedAt",
         submission.completed_at as "completedAt"
       from public.assignment_submissions submission
       join public.assignments assignment
@@ -1137,6 +1180,9 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         and member.class_id = assignment.class_id
         and member.student_id = submission.student_id
         and member.is_active
+      join public.user_profiles profile
+        on profile.id = submission.student_id
+        and profile.school_id = submission.school_id
       where submission.school_id = ${identity.schoolId}::uuid
         and submission.assignment_id = ${assignmentId}::uuid
         and submission.student_id = ${identity.userId}::uuid

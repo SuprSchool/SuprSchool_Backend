@@ -116,6 +116,14 @@ export interface AssignmentSubmission {
   id: string;
   marks?: number | undefined;
   studentId: string;
+  /**
+   * `user_profiles.display_name` of the submitting student, joined school-scoped
+   * beside the submission in every read that produces this DTO. Required, not
+   * optional: 668:4935 / 668:4886 name the student in the roster row, in the
+   * search box and in the footer, and with only `studentId` on the contract all
+   * three printed a raw UUID.
+   */
+  studentName: string;
   submittedAt?: string | undefined;
 }
 

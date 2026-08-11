@@ -1251,3 +1251,228 @@ describe('student assignment assignedAt timestamps', () => {
     expect(listQuery.slice(whereIndex)).toContain('"assignments"."school_id" = $');
   });
 });
+
+/**
+ * 668:4935 / 668:4886 name the submitting student in the roster row, in the
+ * search box and in the footer. The submission contract carried only
+ * `studentId`, so every one of those printed a raw UUID. The name is joined
+ * beside the submission in each read that produces the DTO, school-scoped like
+ * every other query in this repository.
+ */
+describe('submission student names', () => {
+  it('returns the joined student name on the teacher submission list', async () => {
+    const service = createService();
+    vi.mocked(service.listSubmissions).mockResolvedValue({
+      items: [{
+        completedAt: null,
+        id: draftSubmissionId,
+        studentId,
+        studentName: 'Asha Patel',
+        submittedAt: '2026-07-15T09:00:00.000Z',
+      }],
+      nextCursor: undefined,
+    });
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    const response = await request(teacherApp)
+      .get('/teacher/assignments/' + assignmentRouteId + '/submissions')
+      .expect(200);
+
+    expect(response.body.items[0]).toMatchObject({ studentId, studentName: 'Asha Patel' });
+  });
+
+  it('returns the joined student name from the grade response', async () => {
+    const service = createService();
+    vi.mocked(service.grade).mockResolvedValue({
+      completedAt: null,
+      gradedAt: '2026-07-16T09:00:00.000Z',
+      id: draftSubmissionId,
+      marks: 8,
+      studentId,
+      studentName: 'Asha Patel',
+      submittedAt: '2026-07-15T09:00:00.000Z',
+    });
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    const response = await request(teacherApp)
+      .put('/teacher/submissions/' + draftSubmissionId + '/grade')
+      .set('Idempotency-Key', 'grade-name-1')
+      .send({ marks: 8 })
+      .expect(200);
+
+    expect(response.body).toMatchObject({ studentName: 'Asha Patel' });
+  });
+
+  it('joins user_profiles school-scoped inside the teacher submission-list query', async () => {
+    const queries: string[] = [];
+    let queryCount = 0;
+    const callback: RemoteCallback = async (query) => {
+      queries.push(query);
+      queryCount += 1;
+      return {
+        rows: queryCount === 1 ? [{ id: 'a1' }] : [[
+          assignmentRouteId,                    // assignmentId
+          null,                                 // completedAt
+          null,                                 // feedback
+          null,                                 // gradedAt
+          draftSubmissionId,                    // id
+          null,                                 // marks
+          null,                                 // objectPath
+          schoolId,                             // schoolId
+          studentId,                            // studentId
+          'Asha Patel',                         // studentName
+          new Date('2026-07-15T09:00:00.000Z'), // submittedAt
+        ]],
+      };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const page = await repository.listSubmissions(
+      { schoolId, userId: teacherId },
+      assignmentRouteId,
+      { limit: 20 },
+    );
+
+    expect(page?.items[0]?.studentName).toBe('Asha Patel');
+    const listQuery = queries.at(-1) ?? '';
+    expect(listQuery).toContain('user_profiles');
+    expect(listQuery).toContain('display_name');
+    // The join carries the tenant, not only the student key: a profile row from
+    // another school can never name a submission in this one.
+    expect(listQuery).toContain('"user_profiles"."school_id"');
+  });
+
+  it('returns the student name from the grade mutation', async () => {
+    const callback: RemoteCallback = async () => ({
+      rows: [[
+        assignmentRouteId,                    // assignmentId
+        null,                                 // completedAt
+        null,                                 // feedback
+        new Date('2026-07-16T09:00:00.000Z'), // gradedAt
+        draftSubmissionId,                    // id
+        8,                                    // marks
+        null,                                 // objectPath
+        studentId,                            // studentId
+        'Asha Patel',                         // studentName
+        new Date('2026-07-15T09:00:00.000Z'), // submittedAt
+      ]],
+    });
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const graded = await repository.grade(
+      { schoolId, userId: teacherId },
+      draftSubmissionId,
+      { marks: 8 },
+      new Date('2026-07-16T09:00:00.000Z'),
+    );
+
+    expect(graded?.studentName).toBe('Asha Patel');
+  });
+
+  /**
+   * The confirm recover path reads its row through raw SQL. `db.execute` returns
+   * the driver's own column labels, so every unaliased column arrived
+   * snake_case and `toStoredSubmission` read `undefined` off it — the mapper
+   * then threw on `row.gradedAt.toISOString()`, and the executor turned that
+   * into "completion unavailable". The recovery could never succeed. The
+   * aliases are what make this row mappable at all; the name rides with them.
+   */
+  it('maps every column of the confirm recover row, including the student name', async () => {
+    let recoverQuery = '';
+    const callback: RemoteCallback = async (query) => ({
+      rows: [(recoverQuery = query, {
+        assignmentId: assignmentRouteId,
+        completedAt: null,
+        feedback: null,
+        gradedAt: null,
+        id: draftSubmissionId,
+        marks: null,
+        objectPath: 'submissions/object-path',
+        studentId,
+        studentName: 'Asha Patel',
+        submittedAt: new Date('2026-07-15T09:00:00.000Z'),
+      }) as never],
+    });
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const submission = await repository.findSubmissionForUpload(
+      { schoolId, userId: studentId },
+      assignmentRouteId,
+      uploadSessionId,
+    );
+
+    expect(submission).toMatchObject({
+      assignmentId: assignmentRouteId,
+      id: draftSubmissionId,
+      studentId,
+      studentName: 'Asha Patel',
+      submittedAt: '2026-07-15T09:00:00.000Z',
+    });
+    // The mapper reads camelCase; only an explicit alias makes the driver emit
+    // it. This is what the fixture above is entitled to assume.
+    for (const alias of ['"assignmentId"', '"studentId"', '"studentName"', '"submittedAt"', '"gradedAt"', '"objectPath"', '"completedAt"']) {
+      expect(recoverQuery).toContain(alias);
+    }
+  });
+
+  it('carries the student name through the submission confirm mutation', async () => {
+    const rows: ReadonlyArray<ReadonlyArray<Record<string, unknown>>> = [
+      // The locked pre-image: no upload session attached yet.
+      [{
+        assignment_id: assignmentRouteId,
+        completed_at: null,
+        feedback: null,
+        graded_at: null,
+        id: draftSubmissionId,
+        marks: null,
+        object_path: null,
+        studentName: 'Asha Patel',
+        student_id: studentId,
+        submitted_at: null,
+        upload_session_id: null,
+      }],
+      // The attached post-image.
+      [{
+        assignment_id: assignmentRouteId,
+        completed_at: null,
+        feedback: null,
+        graded_at: null,
+        id: draftSubmissionId,
+        marks: null,
+        object_path: 'submissions/object-path',
+        studentName: 'Asha Patel',
+        student_id: studentId,
+        submitted_at: new Date('2026-07-15T09:00:00.000Z'),
+      }],
+    ];
+    let call = 0;
+    const callback: RemoteCallback = async () => {
+      const next = rows[call] ?? [];
+      call += 1;
+      return { rows: next as never };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      databaseWithTransaction(callback),
+    );
+
+    const confirmed = await repository.confirmSubmission({
+      assignmentId: assignmentRouteId,
+      displayName: 'essay.pdf',
+      identity: { schoolId, userId: studentId },
+      objectPath: 'submissions/object-path',
+      submittedAt: new Date('2026-07-15T09:00:00.000Z'),
+      uploadSessionId,
+    });
+
+    expect(confirmed).toMatchObject({
+      kind: 'attached',
+      submission: { studentId, studentName: 'Asha Patel' },
+    });
+  });
+});

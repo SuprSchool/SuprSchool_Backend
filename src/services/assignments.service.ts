@@ -289,6 +289,7 @@ function toSubmission(stored: StoredSubmission): AssignmentSubmission {
     id: stored.id,
     ...(stored.marks === undefined ? {} : { marks: stored.marks }),
     studentId: stored.studentId,
+    studentName: stored.studentName,
     ...(stored.submittedAt === undefined ? {} : { submittedAt: stored.submittedAt }),
   };
 }

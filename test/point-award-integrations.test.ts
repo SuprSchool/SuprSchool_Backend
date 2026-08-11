@@ -87,7 +87,7 @@ describe('production point awards', () => {
   it('keeps a durable assignment submission successful when its school has no point rules yet', async () => {
     const confirmSubmission = vi.fn(async () => ({
       kind: 'attached' as const,
-      submission: { assignmentId, completedAt: null, id: submissionId, studentId },
+      submission: { assignmentId, completedAt: null, id: submissionId, studentId, studentName: 'Asha Patel' },
     }));
     const insertAwardIfAbsent = vi.fn();
     const pointAwards = new PointAwardGateway({
