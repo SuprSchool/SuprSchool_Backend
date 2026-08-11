@@ -61,6 +61,13 @@ export interface DiaryRecord extends TeacherDiaryDto {
 }
 
 export interface StudentDiaryDto extends TeacherDiaryDto {
+  /**
+   * The subject the entry belongs to. `classSubjectId` identifies the
+   * class-subject pairing rather than the subject, so a reader that merges the
+   * per-subject lists into one feed — the my-class diary — cannot otherwise
+   * name the subject an entry came from, or link back to its workspace.
+   */
+  subjectId: string;
   teacherName: string;
 }
 

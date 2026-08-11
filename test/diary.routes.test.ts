@@ -11,8 +11,10 @@ import type { DiaryService } from '../src/services/diary.service.js';
 import { DrizzleDiaryRepository } from '../src/db/repositories/diary.repository.js';
 import type { DiaryRepository } from '../src/db/repositories/diary.repository.js';
 import type { Database } from '../src/db/client.js';
+import { classSubjects } from '../src/db/schema/core.js';
+import { classDiaryEntries } from '../src/db/schema/diary.js';
 import type { DiaryOutboxWriter } from '../src/async/diary/diary-outbox.js';
-import type { DiaryEntryView, DiaryRecord } from '../src/types/diary.js';
+import type { DiaryEntryView, DiaryRecord, StudentDiaryDto } from '../src/types/diary.js';
 import type { IdempotencyStore } from '../src/platform/idempotency/idempotency-store.js';
 import type { QueueClient } from '../src/platform/queue/queue-client.js';
 import { createDiaryPublishedMessage } from '../src/async/diary/diary-published.message.js';
@@ -61,6 +63,16 @@ function createTeacherDiary() {
 
 function createCommittedDiary(): DiaryRecord {
   return { ...createTeacherDiary(), revision: 1, schoolId: 'school-1' };
+}
+
+/**
+ * What a student reads: the stored entry, the teacher who wrote it, and the
+ * subject it belongs to. `classSubjectId` identifies the class-subject pairing,
+ * not the subject, so it cannot name the subject once the client flattens one
+ * list per subject into a single my-class feed.
+ */
+function createStudentDiary(): StudentDiaryDto {
+  return { ...createTeacherDiary(), subjectId, teacherName: 'Asha Rao' };
 }
 
 /** What the service returns: the stored entry plus the freshly derived lock. */
@@ -257,6 +269,22 @@ describe('diary router', () => {
     expect(service.listForStudent).toHaveBeenCalledWith('student-1', 'school-1', subjectId, {
       limit: 25,
     });
+  });
+
+  it('names the subject each student diary entry belongs to', async () => {
+    const service = createDiaryService();
+    vi.mocked(service.listForStudent).mockResolvedValue({
+      items: [createStudentDiary()],
+      nextCursor: null,
+    });
+    const app = express();
+    app.use('/student', createDiaryRouter(service, authenticateAs('student')));
+    app.use(errorHandler);
+
+    const response = await request(app).get(`/student/subjects/${subjectId}/diary`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.items[0].subjectId).toBe(subjectId);
   });
 
   it('updates a teacher diary using the authenticated teacher and idempotency key', async () => {
@@ -460,6 +488,67 @@ describe('diary repository', () => {
       transaction: (work: (tx: unknown) => Promise<unknown>) => work(transaction),
     };
   }
+
+  /**
+   * Drives the real `listForStudent` through a recording query builder. The
+   * projection handed to `select` is half the behaviour under test: the join
+   * already pins `class_subjects.subject_id`, so the subject is only absent
+   * from the response because nothing asked the row for it.
+   */
+  function createStudentDiaryDatabase(
+    rows: ReadonlyArray<Record<string, unknown>>,
+    capture: (projection: Record<string, unknown>) => void,
+  ) {
+    const chain: Record<string, unknown> = {};
+    const self = () => chain;
+    Object.assign(chain, {
+      from: self,
+      innerJoin: self,
+      limit: () => Promise.resolve(rows),
+      orderBy: self,
+      where: self,
+    });
+
+    return {
+      select: (projection: Record<string, unknown>) => {
+        capture(projection);
+        return chain;
+      },
+    };
+  }
+
+  it('carries the owning subject onto every student diary entry', async () => {
+    let projection: Record<string, unknown> | undefined;
+    const database = createStudentDiaryDatabase([{
+      classId,
+      classSubjectId,
+      description: 'Added unlike fractions',
+      id: diaryId,
+      keyPoints: ['LCD'],
+      occurredOn: '2026-07-13',
+      periodLabel: '1st Period',
+      revision: 1,
+      schoolId: 'school-1',
+      subjectId,
+      teacherId: 'teacher-1',
+      teacherName: 'Asha Rao',
+      title: 'Fractions',
+      updatedAt: new Date('2026-07-13T10:00:00.000Z'),
+    }], (captured) => { projection = captured; });
+    const repository = new DrizzleDiaryRepository(
+      database as unknown as Database,
+      { writeInTransaction: vi.fn().mockResolvedValue(undefined) } as unknown as DiaryOutboxWriter,
+    );
+
+    const page = await repository.listForStudent('student-1', 'school-1', subjectId, { limit: 25 });
+
+    // Identity, not just presence: `classSubjectId` is already in this
+    // projection and would satisfy a `toHaveProperty` check while naming the
+    // class-subject pairing rather than the subject.
+    expect(projection?.subjectId).toBe(classSubjects.subjectId);
+    expect(projection?.subjectId).not.toBe(classDiaryEntries.classSubjectId);
+    expect(page.items[0]).toMatchObject({ id: diaryId, subjectId, teacherName: 'Asha Rao' });
+  });
 
   it('undeletes the row when a deleted day and period is written again', async () => {
     let conflict: { set: Record<string, unknown> } | undefined;
