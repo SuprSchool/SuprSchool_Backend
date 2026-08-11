@@ -318,6 +318,15 @@ export class DrizzleCommunityProfileRepository implements CommunityProfileReposi
    * The school payload's Events tab (`253:15008`). Visibility is unchanged from
    * the reader this replaced; the card fields are new.
    *
+   * That inherited visibility carries a known gap, left in place deliberately
+   * rather than widened inside a payload change: for a student the `where`
+   * clause admits an event only through an `event_audiences` row, so an event
+   * with `audience_type = 'school'` and no audience rows is invisible on this
+   * tab even though the student may register for it. `isEligible` below does
+   * honour `audience_type = 'school'`, because it mirrors the registration
+   * predicate — so the two can disagree for exactly those events. Filed as an
+   * open backend-contract row in docs/parity/SHARED-REQUESTS.md.
+   *
    * `isEligible` applies the same predicate `registerStudent` enforces —
    * unarchived, registration still open, and the audience covers the caller —
    * so the chip cannot promise a registration the write path would refuse. A

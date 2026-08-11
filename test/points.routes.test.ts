@@ -361,7 +361,7 @@ describe('points activity repository', () => {
     expect(JSON.stringify(queries[1])).toContain('2026-07-13T10:00:03.123456Z');
   });
 
-  it('bounds the activity window per period and leaves all time unbounded', async () => {
+  it('bounds the activity window on calendar boundaries and leaves all time unbounded', async () => {
     const queries: unknown[] = [];
     const database = {
       async execute(query: unknown) {
@@ -376,10 +376,16 @@ describe('points activity repository', () => {
     await repository.listActivity(identity, { limit: 10, period: 'month' });
     await repository.listActivity(identity, { limit: 10, period: 'all' });
 
-    expect(JSON.stringify(queries[0])).toContain("interval '7 days'");
+    // "This Week" and "This Month" name calendar periods on 761:4817, so the
+    // windows are calendar-truncated. A trailing 7-day window under a "This
+    // Week" label drops Sunday's points the moment Monday starts.
+    expect(JSON.stringify(queries[0])).toContain("date_trunc('week', now())");
+    expect(JSON.stringify(queries[0])).not.toContain("date_trunc('month'");
+    expect(JSON.stringify(queries[0])).not.toContain('interval');
     expect(JSON.stringify(queries[1])).toContain("date_trunc('month', now())");
-    expect(JSON.stringify(queries[2])).not.toContain('interval');
+    expect(JSON.stringify(queries[1])).not.toContain("date_trunc('week'");
     expect(JSON.stringify(queries[2])).not.toContain('date_trunc');
+    expect(JSON.stringify(queries[2])).not.toContain('interval');
     // The window never widens the tenancy or ownership predicate.
     for (const query of queries) {
       expect(JSON.stringify(query)).toContain('ledger.school_id');
