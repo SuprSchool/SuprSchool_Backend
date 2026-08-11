@@ -14,7 +14,7 @@ export interface AvatarDisplayUrlSigner {
 }
 
 export interface ProfileService {
-  getProfile(userId: string): Promise<ProfileDescriptor>;
+  getProfile(userId: string, schoolId: string): Promise<ProfileDescriptor>;
   replaceInterests(userId: string, interests: readonly ProfileInterest[]): Promise<void>;
   setPresetAvatar(userId: string, presetId: string): Promise<ProfileAvatar>;
 }
@@ -27,8 +27,8 @@ export function createProfileService({
   avatarUrlSigner?: AvatarDisplayUrlSigner;
 }): ProfileService {
   return {
-    async getProfile(userId) {
-      const profile = await repository.getProfile(userId);
+    async getProfile(userId, schoolId) {
+      const profile = await repository.getProfile(userId, schoolId);
       if (!profile) throw new AppError('NOT_FOUND', 404, 'Profile not found');
       if (profile.avatar?.kind !== 'upload') return profile;
       if (avatarUrlSigner === undefined) {

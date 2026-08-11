@@ -78,6 +78,7 @@ export const leaderboardQuerySchema = z.object({
     }
   }).optional(),
   limit: z.coerce.number().int().min(1).max(50).default(20),
+  subjectId: z.uuid().optional(),
 });
 
 export const createExamGroupSchema = z.object({

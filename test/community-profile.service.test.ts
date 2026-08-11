@@ -14,11 +14,13 @@ import type { ProfileDescriptor } from '../src/types/profile.js';
 
 const profile: ProfileDescriptor = {
   avatar: { kind: 'preset', value: 'avatar-1' },
+  className: 'Class 9th - B',
   displayName: 'Ada Lovelace',
   id: '00000000-0000-4000-8000-000000000101',
   interests: ['Coding', 'Reading', 'Art', 'Music', 'Sports'],
   phoneE164: '+15550000001',
   schoolId: '00000000-0000-4000-8000-000000000001',
+  section: 'B',
 };
 
 function createSchool(

@@ -189,6 +189,12 @@ export interface ExamResultListQuery {
 export interface LeaderboardQuery {
   cursor?: LeaderboardCursor | undefined;
   limit: number;
+  /**
+   * Narrows the board to one subject of the group (`253:7515`'s subject tabs).
+   * Absent means the Overall tab: every published assessment in the group.
+   * Assessments carry a non-null `subject_id`, so this filters real rows.
+   */
+  subjectId?: string | undefined;
 }
 
 const examGroupCursorSchema = z.object({

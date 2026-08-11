@@ -23,7 +23,8 @@ export function createProfileController(
 ) {
   return {
     getProfile: async (request: Request, response: Response): Promise<void> => {
-      response.status(200).json(await service.getProfile(authenticatedIdentity(request).userId));
+      const { schoolId, userId } = authenticatedIdentity(request);
+      response.status(200).json(await service.getProfile(userId, schoolId));
     },
     replaceInterests: async (request: Request, response: Response): Promise<void> => {
       const { interests } = replaceProfileInterestsSchema.parse(request.body);

@@ -223,7 +223,9 @@ export function createExamsService({
         version = randomUUID();
         await cacheSet(versionKey, version, 300);
       }
-      const key = tenantCacheKey(identity.schoolId, 'exams', 'leaderboard', groupId + ':version:' + version + ':limit:' + query.limit);
+      // Subject is a scope dimension exactly like limit: both boards of one
+      // group share a version key, so it has to be part of the cache key.
+      const key = tenantCacheKey(identity.schoolId, 'exams', 'leaderboard', groupId + ':version:' + version + ':limit:' + query.limit + ':subject:' + (query.subjectId ?? 'all'));
       const cached = query.cursor === undefined ? await cacheGet(key) : undefined;
       const cachedLeaderboard = cached === null || cached === undefined ? undefined : parseCachedJson<CursorPage<LeaderboardEntry>>(cached);
       if (cachedLeaderboard !== undefined) return cachedLeaderboard;
