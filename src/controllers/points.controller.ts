@@ -21,6 +21,7 @@ export function createPointsController(service: PointsService): PointsController
       const query = pointsActivityQuerySchema.parse(request.query);
       const page = {
         limit: query.limit,
+        period: query.period,
         ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
       };
       response.status(200).json(await service.getActivity(requireStudentIdentity(request), page));

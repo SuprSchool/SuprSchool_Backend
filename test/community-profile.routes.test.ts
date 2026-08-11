@@ -21,16 +21,27 @@ function createService(): CommunityProfileService {
     getCurrentSchool: vi.fn(async (identity) => ({
       address: '12 Learning Lane',
       description: ['A tenant-safe school description.'],
-      events: [],
+      events: [{
+        additionalCategoryCount: 2,
+        category: 'Curricular Competition',
+        date: '2026-08-14T09:00:00.000000Z',
+        id: 'event-1',
+        imageUrl: 'https://storage.example/academic-files/event-1?token=caller-school',
+        isEligible: false,
+        registeredCount: 50,
+        title: 'Drama Club Fest',
+      }],
       gallery: identity.schoolId === schoolId
         ? [{ altText: 'Science fair', id: 'gallery-1', url: 'https://storage.example/school-1?token=caller-school' }]
         : [{ altText: 'Other school gallery', id: 'gallery-2', url: 'https://storage.example/school-2?token=other-school' }],
       id: identity.schoolId,
       name: identity.schoolId === schoolId ? 'Supr School' : 'Other School',
+      phone: '+911234567890',
       rating: 'A+',
       rules: ['Be kind.'],
       rulesIntro: 'School expectations',
       studentCount: 12,
+      supportEmail: 'help@school.example',
       teacherCount: 2,
     })),
     getStudentOverview: vi.fn(async (identity) => ({
@@ -142,6 +153,28 @@ describe('community profile REST API', () => {
     );
     expect(service.getCurrentSchool).toHaveBeenCalledWith({
       role: 'teacher', schoolId, userId: teacherId,
+    });
+  });
+
+  it('returns school contact fields', async () => {
+    const { app } = createTestApp();
+
+    const response = await request(app).get('/v1/schools/current').expect(200);
+
+    expect(response.body.phone).toBe('+911234567890');
+    expect(response.body.supportEmail).toBe('help@school.example');
+  });
+
+  it('returns the event card fields the school Events tab draws', async () => {
+    const { app } = createTestApp();
+
+    const response = await request(app).get('/v1/schools/current').expect(200);
+
+    expect(response.body.events[0]).toMatchObject({
+      additionalCategoryCount: 2,
+      imageUrl: 'https://storage.example/academic-files/event-1?token=caller-school',
+      isEligible: false,
+      registeredCount: 50,
     });
   });
 });

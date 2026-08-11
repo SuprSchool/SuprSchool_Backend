@@ -1,5 +1,6 @@
 import type {
   PointActivityPage,
+  PointActivityPeriod,
   PointAwardInsert,
   PointCursorPage,
   PointEarningRule,
@@ -38,6 +39,17 @@ interface PointActivityRow {
   ruleCode: string;
   ruleIcon: PointEarningRule['icon'];
   ruleLabel: string;
+}
+
+/**
+ * The window `761:4817` selects. It narrows the same school- and user-scoped
+ * query the cursor pages through — the two never share a parameter, so paging
+ * inside a week cannot silently reset the window.
+ */
+function periodWindow(period: PointActivityPeriod) {
+  if (period === 'week') return sql`ledger.occurred_at >= now() - interval '7 days'`;
+  if (period === 'month') return sql`ledger.occurred_at >= date_trunc('month', now())`;
+  return sql`true`;
 }
 
 
@@ -177,6 +189,7 @@ export class DrizzlePointsRepository implements PointsRepository {
        and rule.code = ledger.rule_code
       where ledger.school_id = ${identity.schoolId}::uuid
         and ledger.recipient_user_id = ${identity.userId}::uuid
+        and ${periodWindow(page.period)}
         and (
           ${page.cursor?.occurredAt ?? null}::timestamptz is null
           or (ledger.occurred_at, ledger.id) < (

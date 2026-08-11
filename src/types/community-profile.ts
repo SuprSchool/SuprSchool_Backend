@@ -33,6 +33,12 @@ export function toCommunityIdentity(
  */
 export const CURRENT_SCHOOL_GALLERY_PAGE_SIZE = 24;
 
+/**
+ * The same bound for the Events tab. Each event can carry a banner to sign, so
+ * an unbounded list would turn one school read into unbounded signing work.
+ */
+export const CURRENT_SCHOOL_EVENT_PAGE_SIZE = 24;
+
 export interface StudentProfileOverview {
   id: string;
   classSection: string;
@@ -67,15 +73,43 @@ export interface AssessmentSummaryReader {
   getStudentAverage(schoolId: string, studentId: string): Promise<number | null>;
 }
 
-export interface SchoolEventSummary {
+/**
+ * What the reader returns: the banner is still an object path here, because a
+ * repository cannot sign a private URL. The service signs it — the same split
+ * the gallery already uses.
+ */
+export interface SchoolEventSummaryRecord {
+  /**
+   * Chips the card draws beyond the primary category chip (`253:15027` shows
+   * `+2`). Derived from the descriptors the event actually carries — the
+   * activity kind when it is not already the primary chip, plus the
+   * participation mode when one is set — never a placeholder.
+   */
+  additionalCategoryCount: number;
   category: string;
   date: string;
   id: string;
+  imageObjectPath: string | null;
+  isEligible: boolean;
+  registeredCount: number;
+  title: string;
+}
+
+/** The wire shape, with the banner signed or explicitly absent. */
+export interface SchoolEventSummary {
+  additionalCategoryCount: number;
+  category: string;
+  date: string;
+  id: string;
+  /** Signed read URL, or null when the event has no confirmed banner. */
+  imageUrl: string | null;
+  isEligible: boolean;
+  registeredCount: number;
   title: string;
 }
 
 export interface SchoolEventSummaryReader {
-  listVisible(identity: CommunityIdentity): Promise<readonly SchoolEventSummary[]>;
+  listVisible(identity: CommunityIdentity): Promise<readonly SchoolEventSummaryRecord[]>;
   countParticipated(schoolId: string, studentId: string): Promise<number>;
   countConducted(schoolId: string, teacherId: string): Promise<number>;
 }
@@ -114,9 +148,13 @@ export interface CurrentSchool {
   id: string;
   logoUrl?: string;
   name: string;
+  /** Settings › Call School Office (758:4541). Null when none is published. */
+  phone: string | null;
   rating: string;
   rules: readonly string[];
   rulesIntro: string;
   studentCount: number;
+  /** Settings › Email Support (758:4541). Null when none is published. */
+  supportEmail: string | null;
   teacherCount: number;
 }

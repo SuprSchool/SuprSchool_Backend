@@ -27,6 +27,8 @@ const assignmentId = '00000000-0000-4000-8000-000000000201';
 class InMemoryPointsRepository implements PointsRepository {
   public readonly entries: PointAwardInsert[] = [];
   public readonly dirtyRecipients: string[] = [];
+  /** Every page the route handed down, so a query parameter cannot be dropped silently. */
+  public readonly activityPages: PointCursorPage[] = [];
   public failPostInsertDirtyWrite = false;
   private readonly recipientIds = new Set([studentId, outsiderId]);
   private readonly rules = new Map<string, PointEarningRule>([
@@ -77,9 +79,9 @@ class InMemoryPointsRepository implements PointsRepository {
 
   public async listActivity(
     identity: PointsIdentity,
-    _page: PointCursorPage,
+    page: PointCursorPage,
   ): Promise<PointActivityPage> {
-    void _page;
+    this.activityPages.push(page);
     return {
       items: this.entries
         .filter((entry) => entry.schoolId === identity.schoolId && entry.recipientUserId === identity.userId)
@@ -218,6 +220,57 @@ describe('student points REST API', () => {
     expect(repository.dirtyRecipients).toHaveLength(1);
   });
 
+  it('scopes points activity by period', async () => {
+    const { app, repository } = createTestApp();
+
+    const response = await request(app)
+      .get('/v1/student/points/activity')
+      .query({ period: 'week' });
+
+    expect(response.status).toBe(200);
+    expect(repository.activityPages.at(-1)).toMatchObject({ period: 'week' });
+  });
+
+  it('defaults an unfiltered activity read to all time', async () => {
+    const { app, repository } = createTestApp();
+
+    await request(app).get('/v1/student/points/activity').expect(200);
+
+    expect(repository.activityPages.at(-1)).toMatchObject({ period: 'all' });
+  });
+
+  it('rejects an invalid period', async () => {
+    const { app, repository } = createTestApp();
+
+    await request(app)
+      .get('/v1/student/points/activity')
+      .query({ period: 'fortnight' })
+      .expect(400);
+
+    expect(repository.activityPages).toHaveLength(0);
+  });
+
+  // 761:4817 selects a window; the cursor keeps paging inside it. Reading the
+  // period out of the cursor — what the client had to do before this endpoint
+  // took a period — makes the two settings fight over one parameter.
+  it('keeps the cursor pagination-only when a period is selected', async () => {
+    const { app, repository } = createTestApp();
+    const cursor = Buffer.from(JSON.stringify({
+      id: '00000000-0000-4000-8000-000000000301',
+      occurredAt: '2026-07-13T10:00:00.123456Z',
+    })).toString('base64url');
+
+    await request(app)
+      .get('/v1/student/points/activity')
+      .query({ cursor, period: 'month' })
+      .expect(200);
+
+    expect(repository.activityPages.at(-1)).toMatchObject({
+      cursor: { id: '00000000-0000-4000-8000-000000000301' },
+      period: 'month',
+    });
+  });
+
   it('rejects a cursor with a non-UUID id before querying activity', async () => {
     const { app } = createTestApp();
     const cursor = Buffer.from(JSON.stringify({
@@ -290,10 +343,11 @@ describe('points activity repository', () => {
     const repository = new DrizzlePointsRepository(database);
     const identity = { schoolId, userId: studentId };
 
-    const first = await repository.listActivity(identity, { limit: 1 });
+    const first = await repository.listActivity(identity, { limit: 1, period: 'all' });
     const second = await repository.listActivity(identity, {
       cursor: first.nextCursor!,
       limit: 1,
+      period: 'all',
     });
 
     expect(first.nextCursor).toEqual({
@@ -305,5 +359,31 @@ describe('points activity repository', () => {
     ]);
     expect(JSON.stringify(queries[0])).toContain('HH24:MI:SS.US');
     expect(JSON.stringify(queries[1])).toContain('2026-07-13T10:00:03.123456Z');
+  });
+
+  it('bounds the activity window per period and leaves all time unbounded', async () => {
+    const queries: unknown[] = [];
+    const database = {
+      async execute(query: unknown) {
+        queries.push(query);
+        return [];
+      },
+    } as unknown as Database;
+    const repository = new DrizzlePointsRepository(database);
+    const identity = { schoolId, userId: studentId };
+
+    await repository.listActivity(identity, { limit: 10, period: 'week' });
+    await repository.listActivity(identity, { limit: 10, period: 'month' });
+    await repository.listActivity(identity, { limit: 10, period: 'all' });
+
+    expect(JSON.stringify(queries[0])).toContain("interval '7 days'");
+    expect(JSON.stringify(queries[1])).toContain("date_trunc('month', now())");
+    expect(JSON.stringify(queries[2])).not.toContain('interval');
+    expect(JSON.stringify(queries[2])).not.toContain('date_trunc');
+    // The window never widens the tenancy or ownership predicate.
+    for (const query of queries) {
+      expect(JSON.stringify(query)).toContain('ledger.school_id');
+      expect(JSON.stringify(query)).toContain('ledger.recipient_user_id');
+    }
   });
 });
