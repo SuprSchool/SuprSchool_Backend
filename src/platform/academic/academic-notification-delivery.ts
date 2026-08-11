@@ -1,6 +1,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { Database } from '../../db/client.js';
+import type { NotificationCategory } from '../../types/notification.js';
 import type { QueueMessage } from '../queue/queue-message.js';
 import type { QueueExecutionContext, QueueMessageHandler } from '../queue/queue-worker.js';
 import { ACADEMIC_EVENT_TYPES, type AcademicEventType } from './academic-outbox.js';
@@ -78,6 +79,7 @@ export class DrizzleAcademicNotificationDeliveryStore
   ): Promise<void> {
     void _recipients;
     const copy = notificationCopy(message.eventType);
+    const category = notificationCategory(message.eventType);
     await this.database.execute(sql`
       with authorized as (
         select distinct user_id
@@ -85,13 +87,14 @@ export class DrizzleAcademicNotificationDeliveryStore
         where user_id is not null
       ), inbox as (
         insert into public.notification_inbox (
-          school_id, user_id, event_id, notification_type, title, body, data
+          school_id, user_id, event_id, notification_type, category, title, body, data
         )
         select
           ${message.schoolId}::uuid,
           authorized.user_id,
           ${message.eventId}::uuid,
           ${message.eventType},
+          ${category},
           ${copy.title},
           ${copy.body},
           ${JSON.stringify(message.payload)}::jsonb
@@ -375,6 +378,40 @@ function notificationCopy(eventType: NotificationEventType): { body: string; tit
     default: {
       // A queue payload is untrusted input; without this the switch fell
       // through and every caller dereferenced `undefined`.
+      const unsupported: never = eventType;
+      throw new Error(`Unsupported notification event type: ${String(unsupported)}`);
+    }
+  }
+}
+
+/**
+ * `persistInboxAndPushes` is the only writer of `notification_inbox`, and the
+ * event type is the only signal it has, so the category is derived here beside
+ * the copy rather than tagged by each producer. The brief anticipated per-site
+ * tagging in `src/async/`, but none of those sites writes a notification: the
+ * ranking handler refreshes snapshots, the events handler delegates to a
+ * consumer nothing implements, and there is no birthday job.
+ *
+ * The mapping is many-to-one on purpose — 268:9469 draws six glyphs across
+ * seven cards, so both grading events are one card and the bell serves two.
+ */
+export function notificationCategory(eventType: NotificationEventType): NotificationCategory {
+  switch (eventType) {
+    case 'announcement.published':
+      return 'school';
+    case 'assignment.submitted':
+    case 'assignment.reminder.requested':
+      return 'assignment';
+    case 'assignment.graded':
+      return 'grade-update';
+    case 'exam.published':
+    case 'exam.reminder.requested':
+      return 'exam';
+    case 'exam.results_published':
+      return 'grade-update';
+    case DIARY_PUBLISHED_EVENT_TYPE:
+      return 'class';
+    default: {
       const unsupported: never = eventType;
       throw new Error(`Unsupported notification event type: ${String(unsupported)}`);
     }
