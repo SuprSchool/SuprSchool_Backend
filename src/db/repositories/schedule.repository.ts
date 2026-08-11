@@ -17,6 +17,7 @@ import { classScheduleSlots } from '../schema/student-home.js';
 import type {
   PendingAttendanceSlot,
   StudentAttendanceDetailRecord,
+  StudentAttendanceYearComparison,
   TeacherAttendanceHistoryEntry,
   TeacherAttendanceHistoryQuery,
   TeacherAttendanceHistoryResponse,
@@ -69,6 +70,10 @@ export interface ScheduleRepository {
     startDate: string,
     endDate: string,
   ): Promise<StudentAttendanceDetailRecord[] | null>;
+  findStudentAttendanceYearComparison(
+    studentId: string,
+    schoolId: string,
+  ): Promise<StudentAttendanceYearComparison[]>;
   findTeacherTimetable(
     teacherId: string,
     schoolId: string,
@@ -313,6 +318,60 @@ export class DrizzleScheduleRepository implements ScheduleRepository {
         ),
       )
       .orderBy(asc(attendanceSessions.attendanceDate));
+  }
+
+  /**
+   * `253:13058` — attendance per academic year for one student.
+   *
+   * The grouping key is the academic year of the class each session belongs to,
+   * so the series follows the school's own calendar rather than a calendar year
+   * cut through the middle of a term. Enrolment is confirmed through
+   * `class_members`, which carries one row per student per academic year and is
+   * never rewritten on promotion, so past years survive.
+   *
+   * Two deliberate omissions. The enrolment join does **not** match on
+   * `class_id`: a student who transfers between two classes inside one school
+   * year keeps only the later membership row, and matching the class would drop
+   * every session marked in the earlier one. And there is no left join from
+   * `academic_years` — a year the student has no attendance in is absent from
+   * the series, because a zero bar would read as "never attended" rather than
+   * "not enrolled yet".
+   */
+  public async findStudentAttendanceYearComparison(
+    studentId: string,
+    schoolId: string,
+  ): Promise<StudentAttendanceYearComparison[]> {
+    const rows = await this.db.execute(sql`
+      select academic_year.name as "year",
+        round(
+          100.0 * count(*) filter (where record.status = 'present') / count(*),
+          1
+        )::float8 as "percentage"
+      from public.attendance_records record
+      join public.attendance_sessions session on session.id = record.session_id
+        and session.school_id = ${schoolId}::uuid
+      join public.classes class_section on class_section.id = session.class_id
+        and class_section.school_id = session.school_id
+      join public.academic_years academic_year
+        on academic_year.id = class_section.academic_year_id
+        and academic_year.school_id = class_section.school_id
+      join public.class_members membership on membership.student_id = record.student_id
+        and membership.school_id = session.school_id
+        and membership.academic_year_id = academic_year.id
+      join public.user_roles role on role.user_id = ${studentId}::uuid
+        and role.school_id = ${schoolId}::uuid
+        and role.role = 'student' and role.is_active
+      where record.student_id = ${studentId}::uuid
+      group by academic_year.id, academic_year.name, academic_year.starts_on
+      order by academic_year.starts_on asc
+    `) as readonly { percentage: number | string; year: string }[];
+
+    // `numeric` arrives as text on some driver configurations, so the cast is
+    // repeated here rather than trusted to the wire format.
+    return rows.map((row) => ({
+      percentage: Number(row.percentage),
+      year: row.year,
+    }));
   }
 
   public async findTeacherTimetable(
