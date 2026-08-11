@@ -11,6 +11,8 @@ import type { DiaryService } from '../src/services/diary.service.js';
 import { DrizzleDiaryRepository } from '../src/db/repositories/diary.repository.js';
 import type { DiaryRepository } from '../src/db/repositories/diary.repository.js';
 import type { Database } from '../src/db/client.js';
+import { classSubjects } from '../src/db/schema/core.js';
+import { classDiaryEntries } from '../src/db/schema/diary.js';
 import type { DiaryOutboxWriter } from '../src/async/diary/diary-outbox.js';
 import type { DiaryEntryView, DiaryRecord, StudentDiaryDto } from '../src/types/diary.js';
 import type { IdempotencyStore } from '../src/platform/idempotency/idempotency-store.js';
@@ -540,7 +542,11 @@ describe('diary repository', () => {
 
     const page = await repository.listForStudent('student-1', 'school-1', subjectId, { limit: 25 });
 
-    expect(projection).toHaveProperty('subjectId');
+    // Identity, not just presence: `classSubjectId` is already in this
+    // projection and would satisfy a `toHaveProperty` check while naming the
+    // class-subject pairing rather than the subject.
+    expect(projection?.subjectId).toBe(classSubjects.subjectId);
+    expect(projection?.subjectId).not.toBe(classDiaryEntries.classSubjectId);
     expect(page.items[0]).toMatchObject({ id: diaryId, subjectId, teacherName: 'Asha Rao' });
   });
 
