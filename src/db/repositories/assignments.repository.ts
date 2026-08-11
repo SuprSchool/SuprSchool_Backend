@@ -427,7 +427,33 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         maxMarks: assignments.maxMarks,
         schoolId: assignments.schoolId,
         subjectId: assignments.subjectId,
+        // Students who have durably submitted, aggregated over the whole class.
+        // A draft row exists from the moment a student opens the upload sheet,
+        // so `submitted_at is not null` is what separates a submission from an
+        // intention. Joining the roster keeps the count from ever exceeding
+        // totalStudents when a submitter has since left the class, so the
+        // card's Pending remainder cannot go negative.
+        submissionCount: sql<string>`(
+          select count(*)
+          from public.assignment_submissions submitted
+          join public.class_members roster
+            on roster.school_id = submitted.school_id
+            and roster.class_id = "assignments"."class_id"
+            and roster.student_id = submitted.student_id
+            and roster.is_active
+          where submitted.school_id = ${identity.schoolId}::uuid
+            and submitted.assignment_id = "assignments"."id"
+            and submitted.submitted_at is not null
+        )`,
         title: assignments.title,
+        // Enrolled students of the assignment's own class, not of the page.
+        totalStudents: sql<string>`(
+          select count(*)
+          from public.class_members roster
+          where roster.school_id = ${identity.schoolId}::uuid
+            and roster.class_id = "assignments"."class_id"
+            and roster.is_active
+        )`,
       })
       .from(assignments)
       .where(and(
@@ -459,7 +485,9 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       isGradedAssignment: row.isGraded,
       ...(row.maxMarks === null ? {} : { maxMarks: row.maxMarks }),
       subjectId: row.subjectId,
+      submissionCount: Number(row.submissionCount),
       title: row.title,
+      totalStudents: Number(row.totalStudents),
     }));
     const last = items.at(-1);
     return {

@@ -1053,7 +1053,9 @@ describe('assignment display codes and due timestamps', () => {
         10,                                    // maxMarks
         schoolId,                              // schoolId
         validAssignment.subjectId,             // subjectId
+        '0',                                   // submissionCount
         validAssignment.title,                 // title
+        '0',                                   // totalStudents
       ]],
     });
     const repository = new DrizzleAssignmentsRepository(
@@ -1249,6 +1251,87 @@ describe('student assignment assignedAt timestamps', () => {
     // predicate deleted. Only the where clause binds this table's school_id to
     // a parameter, so that is what has to be asserted.
     expect(listQuery.slice(whereIndex)).toContain('"assignments"."school_id" = $');
+  });
+});
+
+/**
+ * 596:16571 draws each assignment card as `submitted/total` with a progress bar
+ * and a Pending remainder. The teacher list contract carried neither figure, so
+ * the client hardcoded `0/0` on every card. Both are correlated subqueries in
+ * the listing query — computed over the assignment's own class, never over the
+ * returned page — mirroring the exam assessment list.
+ */
+describe('teacher assignment roster counts', () => {
+  const listDisplayCode = `ASG-${new Date().getUTCFullYear()}-012`;
+  const listRow = (submitted: string, total: string) => [
+    new Date('2026-03-01T09:00:00.000Z'), // createdAt
+    listDisplayCode,                      // displayCode
+    new Date('2026-04-05T22:00:00.000Z'), // dueAt
+    'Numeric',                            // gradingType
+    assignmentRouteId,                    // id
+    false,                                // isGraded
+    10,                                   // maxMarks
+    schoolId,                             // schoolId
+    validAssignment.subjectId,            // subjectId
+    submitted,                            // submissionCount
+    validAssignment.title,                // title
+    total,                                // totalStudents
+  ];
+
+  it('counts submitted students and the live class roster inside the listing query', async () => {
+    const queries: string[] = [];
+    const callback: RemoteCallback = async (query) => {
+      queries.push(query);
+      return { rows: [listRow('20', '33')] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      drizzle(callback) as unknown as Database,
+    );
+
+    const page = await repository.listForTeacher(
+      { schoolId, userId: teacherId },
+      classRouteId,
+      { limit: 20 },
+    );
+
+    expect(page.items[0]).toMatchObject({ submissionCount: 20, totalStudents: 33 });
+
+    const listQuery = queries[0] ?? '';
+    expect(listQuery).toContain('assignment_submissions');
+    expect(listQuery).toContain('class_members');
+    // A draft row exists from the moment a student opens the upload sheet, so
+    // only a durable submitted_at counts as a submission.
+    expect(listQuery).toContain('submitted_at is not null');
+    // Both counts are restricted to students still enrolled, so Pending cannot
+    // go negative when a graded student has since left the class.
+    expect(listQuery).toContain('is_active');
+  });
+
+  it('serves both counts on the teacher assignment list route', async () => {
+    const service = createService();
+    vi.mocked(service.listForTeacher).mockResolvedValue({
+      items: [{
+        createdAt: '2026-03-01T09:00:00.000Z',
+        displayCode: listDisplayCode,
+        dueAt: '2026-04-05T22:00:00.000Z',
+        gradingType: 'Numeric',
+        id: assignmentRouteId,
+        isGradedAssignment: false,
+        maxMarks: 10,
+        subjectId: validAssignment.subjectId,
+        submissionCount: 20,
+        title: validAssignment.title,
+        totalStudents: 33,
+      }],
+      nextCursor: undefined,
+    });
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    const response = await request(teacherApp)
+      .get('/teacher/classes/' + classRouteId + '/assignments')
+      .expect(200);
+
+    expect(response.body.items[0]).toMatchObject({ submissionCount: 20, totalStudents: 33 });
   });
 });
 

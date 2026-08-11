@@ -97,7 +97,16 @@ export interface TeacherAssignmentItem {
   isGradedAssignment: boolean;
   maxMarks?: number | undefined;
   subjectId: string;
+  /**
+   * Students who have durably submitted, aggregated over the assignment's own
+   * class in the listing query rather than over the returned page. 596:16571
+   * draws it as the numerator of the card's `submitted/total` and its progress
+   * bar; Pending is the client's remainder. Both figures are restricted to
+   * students still actively enrolled, so the remainder cannot go negative.
+   */
+  submissionCount: number;
   title: string;
+  totalStudents: number;
 }
 
 export const submissionCompletionActions = ['complete', 'incomplete'] as const;
