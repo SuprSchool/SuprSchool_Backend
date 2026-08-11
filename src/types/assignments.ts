@@ -71,6 +71,15 @@ export interface AssignmentDetail {
   rubrics: ReadonlyArray<AssignmentRubric>;
   subjectId: string;
   title: string;
+  /**
+   * The reading student's own submission, mirroring `StudentAssignmentItem`.
+   * Present only on the student detail — clients derive submitted/graded from
+   * these, so a detail without them always reads as "Not Submitted", including
+   * on the confirmation screen shown straight after a successful submit.
+   */
+  gradedAt?: string | undefined;
+  marks?: number | undefined;
+  submittedAt?: string | undefined;
 }
 
 export interface StudentAssignmentItem {

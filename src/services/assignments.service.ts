@@ -398,12 +398,21 @@ export function createAssignmentsService({
       // An entry written before `assignedAt` existed is a miss, not a hit: the
       // field is declared always-present, so serving it absent would break the
       // contract for the 30 seconds such an entry can survive a deploy.
+      // The caller's own submission is merged *outside* the cache on purpose:
+      // this key is school-scoped, so caching per-student fields would serve
+      // one student's submission state to every other student in the school
+      // for the entry's lifetime.
+      const ownSubmission = {
+        ...(assignment.gradedAt === undefined ? {} : { gradedAt: assignment.gradedAt }),
+        ...(assignment.marks === undefined ? {} : { marks: assignment.marks }),
+        ...(assignment.submittedAt === undefined ? {} : { submittedAt: assignment.submittedAt }),
+      };
       if (cachedDetail !== undefined && typeof cachedDetail.assignedAt === 'string') {
-        return cachedDetail;
+        return { ...cachedDetail, ...ownSubmission };
       }
       const detail = await toDetail(assignment);
       await cacheSet(key, JSON.stringify(detail), 30);
-      return detail;
+      return { ...detail, ...ownSubmission };
     },
 
     async getForTeacher(identity, assignmentId) {

@@ -97,7 +97,10 @@ describe('assignment submission confirm', () => {
 
     // A string timestamp off the raw path must still map, not throw.
     expect(confirmed?.kind).toBe('attached');
-    expect(confirmed?.submission.submittedAt).toBe(submittedAt.toISOString());
+    if (confirmed === undefined || confirmed.kind === 'conflict') {
+      throw new Error(`expected an attached submission, got ${String(confirmed?.kind)}`);
+    }
+    expect(confirmed.submission.submittedAt).toBe(submittedAt.toISOString());
 
     const update = queries.find((query) => query.sql.includes('update public.assignment_submissions'));
     expect(update, 'the confirm path must reach its update').toBeDefined();

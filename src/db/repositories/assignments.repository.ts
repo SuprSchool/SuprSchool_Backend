@@ -63,6 +63,16 @@ export interface StoredAssignmentDetail {
   rubrics: ReadonlyArray<AssignmentRubric>;
   subjectId: string;
   title: string;
+  /**
+   * The reading student's *own* submission, populated by `findForStudent`
+   * only. The list read model already carries these, and clients derive
+   * submitted/graded from them — without them a detail always reads as
+   * pending. Never set for a teacher, and never cached: the detail cache is
+   * school-scoped, so per-student fields must be merged outside it.
+   */
+  gradedAt?: string | undefined;
+  marks?: number | undefined;
+  submittedAt?: string | undefined;
 }
 
 export interface SubmissionDraft {
@@ -416,7 +426,34 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       isNull(assignments.deletedAt),
       this.studentAudience(identity),
     ));
-    return record === undefined ? undefined : this.withDetails(record);
+    if (record === undefined) return undefined;
+    const [detail, [own]] = await Promise.all([
+      this.withDetails(record),
+      this.db
+        .select({
+          gradedAt: assignmentSubmissions.gradedAt,
+          marks: assignmentSubmissions.marks,
+          submittedAt: assignmentSubmissions.submittedAt,
+        })
+        .from(assignmentSubmissions)
+        .where(and(
+          eq(assignmentSubmissions.assignmentId, assignmentId),
+          eq(assignmentSubmissions.schoolId, identity.schoolId),
+          eq(assignmentSubmissions.studentId, identity.userId),
+        ))
+        .limit(1),
+    ]);
+    // Tolerant conversion: a malformed or absent submission timestamp must
+    // degrade to "no submission", never throw a RangeError and turn the whole
+    // detail into a 500.
+    const gradedAtIso = submissionTimestampIso(own?.gradedAt ?? null);
+    const submittedAtIso = submissionTimestampIso(own?.submittedAt ?? null);
+    return {
+      ...detail,
+      ...(gradedAtIso === null ? {} : { gradedAt: gradedAtIso }),
+      ...(typeof own?.marks === 'number' ? { marks: own.marks } : {}),
+      ...(submittedAtIso === null ? {} : { submittedAt: submittedAtIso }),
+    };
   }
 
   public async findForTeacher(
