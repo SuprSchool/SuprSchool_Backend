@@ -1238,7 +1238,16 @@ describe('student assignment assignedAt timestamps', () => {
       new Date('2026-08-01T00:00:00.000Z'),
     );
 
-    expect(queries[0]).toContain('created_at');
-    expect(queries[0]).toContain('school_id');
+    const listQuery = queries[0] ?? '';
+    const whereIndex = listQuery.indexOf(' where ');
+    expect(whereIndex).toBeGreaterThan(-1);
+
+    expect(listQuery).toContain('"assignments"."created_at"');
+    // Asserting the bare token `school_id` would prove nothing: the projection
+    // selects `"assignments"."school_id"`, and the joins compare the subjects
+    // and submissions columns, so the token survives even with the tenancy
+    // predicate deleted. Only the where clause binds this table's school_id to
+    // a parameter, so that is what has to be asserted.
+    expect(listQuery.slice(whereIndex)).toContain('"assignments"."school_id" = $');
   });
 });
