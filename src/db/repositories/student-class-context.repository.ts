@@ -1,4 +1,4 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 
 import type { Database } from '../client.js';
 import {
@@ -58,6 +58,9 @@ export class DrizzleStudentClassContextRepository implements StudentClassContext
         .select({
           displayName: userProfiles.displayName,
           id: userProfiles.id,
+          // nullif(btrim(...)) so a blank stored value reports null rather than
+          // an empty string: the client draws the call button on that distinction.
+          phone: sql<string | null>`nullif(btrim(${userProfiles.contactPhoneE164}), '')`.as('phone'),
           subjectId: subjects.id,
           subjectName: subjects.name,
         })

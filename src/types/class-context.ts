@@ -15,6 +15,11 @@ export interface ClassContextStudent {
 export interface ClassContextTeacher {
   displayName: string;
   id: string;
+  /**
+   * Published E.164 contact number, or null when the teacher has none. Never an
+   * empty string: the client renders the call button on this distinction.
+   */
+  phone: string | null;
   subjectId: string;
   subjectName: string;
 }
