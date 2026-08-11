@@ -210,18 +210,31 @@ type AssignmentRow = {
   updatedAt: Date;
 };
 
+/**
+ * Timestamps arrive as Dates from the query builders and as strings from the
+ * raw `sql` paths, which are cast rather than parsed — so the compiler cannot
+ * tell the two apart here. Accept both rather than trusting the cast.
+ */
+type SubmissionTimestamp = Date | string | null;
+
 type SubmissionRow = {
   assignmentId: string;
-  completedAt: Date | null;
+  completedAt: SubmissionTimestamp;
   feedback: string | null;
-  gradedAt: Date | null;
+  gradedAt: SubmissionTimestamp;
   id: string;
   marks: number | null;
   objectPath: string | null;
   studentId: string;
   studentName: string;
-  submittedAt: Date | null;
+  submittedAt: SubmissionTimestamp;
 };
+
+function submissionTimestampIso(value: SubmissionTimestamp): string | null {
+  if (value === null || value === undefined) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
 
 function toIso(value: Date | null): string | undefined {
   return value === null ? undefined : value.toISOString();
@@ -254,15 +267,19 @@ function isDisplayCodeConflict(error: unknown): boolean {
 function toStoredSubmission(row: SubmissionRow): StoredSubmission {
   return {
     assignmentId: row.assignmentId,
-    completedAt: row.completedAt === null ? null : row.completedAt.toISOString(),
+    completedAt: submissionTimestampIso(row.completedAt),
     ...(row.feedback === null ? {} : { feedback: row.feedback }),
-    ...(row.gradedAt === null ? {} : { gradedAt: row.gradedAt.toISOString() }),
+    ...(submissionTimestampIso(row.gradedAt) === null
+      ? {}
+      : { gradedAt: submissionTimestampIso(row.gradedAt) as string }),
     id: row.id,
     ...(row.marks === null ? {} : { marks: row.marks }),
     ...(row.objectPath === null ? {} : { objectPath: row.objectPath }),
     studentId: row.studentId,
     studentName: row.studentName,
-    ...(row.submittedAt === null ? {} : { submittedAt: row.submittedAt.toISOString() }),
+    ...(submissionTimestampIso(row.submittedAt) === null
+      ? {}
+      : { submittedAt: submissionTimestampIso(row.submittedAt) as string }),
   };
 }
 
@@ -806,6 +823,13 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           : { kind: "conflict" };
       }
 
+      // `submittedAt` is a Date, and a raw `sql` parameter reaches the driver
+      // untouched — unlike a Drizzle query builder, nothing converts it. Passing
+      // the Date itself throws "The 'string' argument must be of type string ...
+      // Received an instance of Date" and fails every submission with a 500, so
+      // it is serialised here. Every other `::timestamptz` in the repositories
+      // is already a string.
+      const submittedAtIso = input.submittedAt.toISOString();
       const updatedRows = await transaction.execute(sql<{
         assignment_id: string;
         completed_at: Date | null;
@@ -822,8 +846,8 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         set upload_session_id = ${input.uploadSessionId}::uuid,
             object_path = ${input.objectPath},
             display_name = ${input.displayName},
-            submitted_at = ${input.submittedAt}::timestamptz,
-            updated_at = ${input.submittedAt}::timestamptz
+            submitted_at = ${submittedAtIso}::timestamptz,
+            updated_at = ${submittedAtIso}::timestamptz
         where id = ${locked.id}::uuid
           and upload_session_id is null
           and school_id = ${input.identity.schoolId}::uuid
