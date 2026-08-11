@@ -1130,6 +1130,7 @@ describe('subject exam detail sections', () => {
         return { rows: [
           ['Close reading', 25, 1, 'Grammar'],
           ['Unseen passage', 10, 2, 'Comprehension'],
+          ['Discursive essay', 5, 3, 'Composition'],
         ] };
       }
       if (query.includes('from "exam_resources"')) {
@@ -1137,8 +1138,11 @@ describe('subject exam detail sections', () => {
       }
       if (query.includes('from "exam_result_revisions"')) return { rows: [] };
       if (query.includes('from "exam_results"')) {
+        // Section 3's value is a string: jsonb accepts it, and it must not
+        // reach the client as a number.
         return { rows: [[
-          'Strong analysis', 'result-1', 20, evaluatedAt, { '1': 20 }, studentId, evaluatedAt,
+          'Strong analysis', 'result-1', 20, evaluatedAt, { '1': 20, '3': 'twenty' },
+          studentId, evaluatedAt,
         ]] };
       }
       if (query.includes('from "point_earning_rules"')) return { rows: [[25]] };
@@ -1162,10 +1166,13 @@ describe('subject exam detail sections', () => {
     expect(detail.syllabusTopics).toEqual([
       'The Little Girl', 'The Road Not Taken', 'The Lost Child',
     ]);
-    // Section one has a stored breakdown; section two does not and stays null.
+    // Section one has a stored breakdown; section two has none; section three
+    // has a non-numeric one, which is not a secured mark and must not print as
+    // "twenty/25 Marks".
     expect(detail.gradingRubric).toEqual([
       { section: 'Grammar', securedMarks: 20, totalMarks: 25 },
       { section: 'Comprehension', securedMarks: null, totalMarks: 10 },
+      { section: 'Composition', securedMarks: null, totalMarks: 5 },
     ]);
     expect(detail.evaluatedDate).toBe(evaluatedAt);
     expect(detail.feedback).toBe('Strong analysis');

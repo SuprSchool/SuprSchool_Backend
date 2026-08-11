@@ -22,6 +22,13 @@
 -- input, so `securedMarks` reads as null until evaluation records it and the
 -- client keeps its section-hidden fallback. The column exists so the read
 -- contract's shape lands once.
+--
+-- HAZARD for whoever writes it: the keys are exam_rubrics.position, which the
+-- teacher can re-order or delete after a breakdown has been recorded. Nothing
+-- re-keys this jsonb when that happens, so a stored breakdown silently
+-- re-attaches to the wrong sections. The writer must re-key it on every rubric
+-- edit, or the breakdown should move to a child table with a real foreign key
+-- to exam_rubrics.id.
 
 alter table public.exam_results
   add column if not exists rubric_secured_marks jsonb

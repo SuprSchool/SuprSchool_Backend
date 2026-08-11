@@ -185,14 +185,21 @@ const assessmentResultPublishedRuleCode = 'assessment-result-published';
  */
 function toGradingRubric(
   rubrics: ReadonlyArray<ExamRubric>,
-  securedMarks: Record<string, number> | null,
+  securedMarks: Record<string, unknown> | null,
 ): ReadonlyArray<ExamGradingRubricItem> | null {
   if (rubrics.length === 0) return null;
-  return rubrics.map((rubric) => ({
-    section: rubric.sectionTitle,
-    securedMarks: securedMarks?.[String(rubric.position)] ?? null,
-    totalMarks: rubric.marks,
-  }));
+  return rubrics.map((rubric) => {
+    const secured = securedMarks?.[String(rubric.position)];
+    return {
+      section: rubric.sectionTitle,
+      // jsonb carries no type guarantee. A string or null written into the
+      // column would otherwise reach the client typed as a number and print
+      // "twenty/25 Marks", so anything that is not a finite number reads as
+      // absent and the section falls back to its total alone.
+      securedMarks: typeof secured === 'number' && Number.isFinite(secured) ? secured : null,
+      totalMarks: rubric.marks,
+    };
+  });
 }
 
 /** One stored text column; 253:8067 draws its lines as a list. */
