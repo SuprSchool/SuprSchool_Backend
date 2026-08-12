@@ -78,9 +78,11 @@ async function run(): Promise<void> {
   try {
     // Shells first, then the public-schema roster, so the foreign key is always
     // satisfied by the time the profile rows land.
+    // postgres.js serialises a plain JS array into a Postgres array parameter;
+    // sql.array() here produced a bare comma-joined string that ::uuid[] rejected.
     const shells = await sql`
       insert into auth.users (id)
-      select unnest(${sql.array(ids)}::uuid[])
+      select unnest(${ids}::uuid[])
       on conflict (id) do nothing
       returning id
     `;
