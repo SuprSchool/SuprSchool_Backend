@@ -33,12 +33,21 @@ import postgres from 'postgres';
 
 import { assertQaProvisioningSafety } from './provision-qa-auth-users.js';
 
-/** Mirrors the roster in supabase/seed-qa-plan2c-roster.sql. */
+/**
+ * Mirrors the roster in supabase/seed-qa-plan2c-roster.sql.
+ *
+ * Class 5 is NOT a fifth 41000000- class -- it fills the pre-existing plan2b
+ * Class 9 - B (40000000-0000-4000-8000-000000000001), the class the QA student
+ * +917230962182 belongs to. The roster SQL maps it explicitly; see that file's
+ * header. Keep the counts here identical to the `values` list in that file or
+ * the shell ids and the profile rows drift apart.
+ */
 const ROSTER_CLASSES = [
   { classNo: 1, studentCount: 55 },
   { classNo: 2, studentCount: 52 },
   { classNo: 3, studentCount: 58 },
   { classNo: 4, studentCount: 50 },
+  { classNo: 5, studentCount: 53 },
 ] as const;
 
 /**
@@ -96,10 +105,19 @@ async function run(): Promise<void> {
           where id::text like '11000000-0000-4000-8000-%') as profiles,
         (select count(*) from public.class_members cm
           join public.user_profiles up on up.id = cm.student_id
-          where up.id::text like '11000000-0000-4000-8000-%') as memberships
+          where up.id::text like '11000000-0000-4000-8000-%') as memberships,
+        (select count(*) from public.student_profiles sp
+          join public.user_profiles up on up.id = sp.student_id
+          where up.id::text like '11000000-0000-4000-8000-%') as birthdays,
+        (select count(*) from public.student_profiles sp
+          join public.user_profiles up on up.id = sp.student_id
+          where up.id::text like '11000000-0000-4000-8000-%'
+            and to_char(sp.date_of_birth, 'MM-DD') = to_char(current_date, 'MM-DD')
+        ) as birthdays_today
     `;
     console.info(
-      `[qa-roster] success profiles=${counts?.profiles ?? 0} memberships=${counts?.memberships ?? 0}`,
+      `[qa-roster] success profiles=${counts?.profiles ?? 0} memberships=${counts?.memberships ?? 0}`
+        + ` birthdays=${counts?.birthdays ?? 0} birthdaysToday=${counts?.birthdays_today ?? 0}`,
     );
   } finally {
     await sql.end({ timeout: 5 });
