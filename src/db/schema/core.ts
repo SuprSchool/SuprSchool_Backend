@@ -146,6 +146,9 @@ export const userProfiles = pgTable(
       .references(() => schools.id, { onDelete: 'restrict' }),
     displayName: text('display_name').notNull(),
     phoneE164: text('phone_e164').notNull(),
+    // Published contact number for the My Class call button. Deliberately
+    // separate from phoneE164, which is the login identity.
+    contactPhoneE164: text('contact_phone_e164'),
     avatarPath: text('avatar_path'),
     avatarKind: avatarKind('avatar_kind'),
     avatarValue: text('avatar_value'),

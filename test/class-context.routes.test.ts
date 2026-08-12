@@ -37,6 +37,45 @@ describe('class context routes', () => {
     expect(service.getClassContext).toHaveBeenCalledWith('student-1', 'school-1');
   });
 
+  it('carries each teacher phone through, and reports null rather than empty when there is none', async () => {
+    const service = {
+      getClassContext: vi.fn().mockResolvedValue({
+        class: { displayName: 'Grade 8 A', grade: '8', id: 'class-1', section: 'A' },
+        students: [],
+        teachers: [
+          {
+            displayName: 'Mrs Sharma',
+            id: 'teacher-1',
+            phone: '+917755090942',
+            subjectId: 'subject-1',
+            subjectName: 'Mathematics',
+          },
+          {
+            displayName: 'Mr Alok',
+            id: 'teacher-2',
+            phone: null,
+            subjectId: 'subject-2',
+            subjectName: 'Hindi',
+          },
+        ],
+        totalStudents: 0,
+      }),
+      listSubjects: vi.fn(),
+    } as unknown as StudentClassContextService;
+    const app = express();
+    app.use('/student', createStudentClassContextRouter(service, authenticateAs('student-1', 'student')));
+    app.use(errorHandler);
+
+    const response = await request(app).get('/student/class-context');
+
+    expect(response.status).toBe(200);
+    expect(response.body.teachers[0].phone).toBe('+917755090942');
+    // The client draws the call button on null vs non-null, so a missing number
+    // must survive serialisation as null and must never arrive as ''.
+    expect(response.body.teachers[1].phone).toBeNull();
+    expect(response.body.teachers[1].phone).not.toBe('');
+  });
+
   it('returns a teacher context only for the requested assigned pair', async () => {
     const service = {
       getAssignedClassSubjectContext: vi.fn().mockResolvedValue({
