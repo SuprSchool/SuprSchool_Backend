@@ -68,8 +68,29 @@ export interface StudentHomeCalendarDayResponse {
   items: StudentHomeCalendarDayItem[];
 }
 
+/**
+ * A birthday that has not happened yet, carrying the date it falls on so the
+ * caller can group by "Tomorrow" / "In 5 days" without recomputing the year
+ * wrap for itself.
+ */
+export interface StudentHomeUpcomingBirthday extends StudentHomeBirthday {
+  /** ISO date of the next occurrence, e.g. "2026-08-19". Never today. */
+  date: string;
+  /** Whole days until `date`. 1 is tomorrow; never 0, that is `birthdays`. */
+  inDays: number;
+}
+
 export interface StudentHomeBirthdaysResponse {
+  /** Birthdays falling today. Unchanged shape -- existing callers still read this. */
   birthdays: StudentHomeBirthday[];
+  /**
+   * Birthdays in the next `windowDays` days, today excluded, ordered by next
+   * occurrence then name. Wraps the year end, so on 28 December a 2 January
+   * birthday appears here.
+   */
+  upcoming: StudentHomeUpcomingBirthday[];
+  /** The horizon actually applied, echoed back so the caller need not assume. */
+  windowDays: number;
 }
 
 export interface StudentHomeResponse {

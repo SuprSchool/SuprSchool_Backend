@@ -19,11 +19,14 @@ export interface StudentHomeServiceDependencies {
   repository: StudentHomeRepository;
 }
 
+/** Horizon applied when the caller does not pass `?window=`. */
+export const defaultBirthdayWindowDays = 30;
+
 export interface StudentHomeService {
   getHome(studentId: string): Promise<StudentHomeResponse>;
   getCalendar(identity: StudentHomeIdentity, month: string): Promise<StudentHomeCalendarResponse>;
   getCalendarDay(identity: StudentHomeIdentity, date: string): Promise<StudentHomeCalendarDayResponse>;
-  getBirthdays(schoolId: string): Promise<StudentHomeBirthdaysResponse>;
+  getBirthdays(schoolId: string, windowDays?: number): Promise<StudentHomeBirthdaysResponse>;
 }
 
 function requireStudentContext<T>(value: T | null): T {
@@ -49,16 +52,21 @@ function monthBounds(month: string): { startDate: string; endDate: string } {
   };
 }
 
-async function resolveBirthdayAvatars(
-  birthdays: StudentHomeBirthday[],
+/**
+ * Generic over the row type so the upcoming list keeps its `date`/`inDays`
+ * through avatar signing; typed as StudentHomeBirthday[] it silently widened
+ * them away.
+ */
+async function resolveBirthdayAvatars<T extends StudentHomeBirthday>(
+  birthdays: T[],
   avatarUrlSigner: StudentHomeAvatarUrlSigner,
-): Promise<StudentHomeBirthday[]> {
+): Promise<T[]> {
   return Promise.all(birthdays.map(async (birthday) => {
     if (birthday.avatar?.kind !== 'upload') return birthday;
     return {
       ...birthday,
       avatar: {
-        kind: 'upload',
+        kind: 'upload' as const,
         value: await avatarUrlSigner.createSignedDownloadUrl('avatars', birthday.avatar.value),
       },
     };
@@ -85,12 +93,18 @@ export function createStudentHomeService(
       const items = requireStudentContext(await repository.getCalendarDayForStudent(identity, date));
       return { items };
     },
-    async getBirthdays(schoolId): Promise<StudentHomeBirthdaysResponse> {
+    async getBirthdays(schoolId, windowDays = defaultBirthdayWindowDays): Promise<StudentHomeBirthdaysResponse> {
+      // One clock read for both lists: two reads could straddle midnight and
+      // produce a student who is neither today's nor tomorrow's.
+      const now = clock();
+      const [birthdays, upcoming] = await Promise.all([
+        repository.getBirthdaysForSchool(schoolId, now),
+        repository.getUpcomingBirthdaysForSchool(schoolId, now, windowDays),
+      ]);
       return {
-        birthdays: await resolveBirthdayAvatars(
-          await repository.getBirthdaysForSchool(schoolId, clock()),
-          avatarUrlSigner,
-        ),
+        birthdays: await resolveBirthdayAvatars(birthdays, avatarUrlSigner),
+        upcoming: await resolveBirthdayAvatars(upcoming, avatarUrlSigner),
+        windowDays,
       };
     },
   };

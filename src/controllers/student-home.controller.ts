@@ -23,6 +23,12 @@ const calendarDateSchema = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]
       && date.getUTCDate() === day;
   }, 'Use a real calendar date');
 
+// Capped at a year: beyond that "upcoming" stops meaning anything, because
+// every student in the school has a birthday within 365 days.
+const birthdayWindowSchema = z.object({
+  window: z.coerce.number().int().min(1).max(365).optional(),
+});
+
 export interface StudentHomeController {
   getHome(request: Request, response: Response): Promise<void>;
   getCalendar(request: Request, response: Response): Promise<void>;
@@ -66,8 +72,13 @@ export function createStudentHomeController(
       response.status(200).json(body);
     },
     async getBirthdays(request: Request, response: Response): Promise<void> {
+      const identity = requireIdentity(request);
+      // schoolId still comes from the token, never the query -- ?window= is the
+      // only thing a caller may influence here.
+      const { window } = birthdayWindowSchema.parse(request.query);
       const body: StudentHomeBirthdaysResponse = await studentHomeService.getBirthdays(
-        requireIdentity(request).schoolId,
+        identity.schoolId,
+        window,
       );
       response.status(200).json(body);
     },

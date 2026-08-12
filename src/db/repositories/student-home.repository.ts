@@ -18,6 +18,7 @@ import {
 } from '../schema/student-home.js';
 import type {
   StudentHomeBirthday,
+  StudentHomeUpcomingBirthday,
   StudentHomeCalendarDayItem,
   StudentHomeCalendarEvent,
   StudentHomeResponse,
@@ -37,6 +38,11 @@ export interface StudentHomeRepository {
     date: string,
   ): Promise<StudentHomeCalendarDayItem[] | null>;
   getBirthdaysForSchool(schoolId: string, now: Date): Promise<StudentHomeBirthday[]>;
+  getUpcomingBirthdaysForSchool(
+    schoolId: string,
+    now: Date,
+    windowDays: number,
+  ): Promise<StudentHomeUpcomingBirthday[]>;
 }
 
 interface StudentClassContext {
@@ -188,6 +194,87 @@ export class DrizzleStudentHomeRepository implements StudentHomeRepository {
           : { kind: row.avatarKind, value: row.avatarValue },
         classLabel: row.classLabel,
         id: row.id,
+        name: row.name,
+      })));
+  }
+
+  /**
+   * Birthdays falling in the next `windowDays` days, today excluded.
+   *
+   * WHY THIS IS NOT `to_char(...) between a and b`. The birthdays that already
+   * shipped match a literal MM-DD against today, which cannot express a window
+   * that crosses the year end -- on 28 December, '12-28' <= x <= '01-27' is
+   * empty under string comparison, so every January birthday would vanish for
+   * the last month of the year. This resolves each row to its NEXT OCCURRENCE
+   * as a real date and filters on that, so December to January is just another
+   * ordinary range.
+   *
+   * The anniversary is computed by adding a whole number of years to the date
+   * of birth rather than by rebuilding it with make_date, because make_date
+   * raises on 29 February in a non-leap year. Adding an interval clamps to the
+   * 28th instead, which is the behaviour a birthday list wants.
+   *
+   * Scope matches getBirthdaysForSchool exactly: the caller's school, active
+   * memberships only, and the class joined on the member's own academic year so
+   * a student who changed class does not print last year's label.
+   */
+  public async getUpcomingBirthdaysForSchool(
+    schoolId: string,
+    now: Date,
+    windowDays: number,
+  ): Promise<StudentHomeUpcomingBirthday[]> {
+    const today = toIsoDate(now);
+    const nextOccurrence = sql`
+      case
+        when (${studentProfiles.dateOfBirth} + make_interval(years =>
+          (extract(year from ${today}::date)::int
+            - extract(year from ${studentProfiles.dateOfBirth})::int)))::date >= ${today}::date
+        then (${studentProfiles.dateOfBirth} + make_interval(years =>
+          (extract(year from ${today}::date)::int
+            - extract(year from ${studentProfiles.dateOfBirth})::int)))::date
+        else (${studentProfiles.dateOfBirth} + make_interval(years =>
+          (extract(year from ${today}::date)::int
+            - extract(year from ${studentProfiles.dateOfBirth})::int) + 1))::date
+      end
+    `;
+    return this.db
+      .select({
+        avatarKind: userProfiles.avatarKind,
+        avatarValue: userProfiles.avatarValue,
+        classLabel: classes.displayName,
+        date: sql<string>`to_char(${nextOccurrence}, 'YYYY-MM-DD')`.as('date'),
+        id: userProfiles.id,
+        inDays: sql<number>`(${nextOccurrence} - ${today}::date)::int`.as('in_days'),
+        name: userProfiles.displayName,
+      })
+      .from(classMembers)
+      .innerJoin(
+        classes,
+        and(
+          eq(classes.id, classMembers.classId),
+          eq(classes.schoolId, classMembers.schoolId),
+          eq(classes.academicYearId, classMembers.academicYearId),
+        ),
+      )
+      .innerJoin(userProfiles, eq(userProfiles.id, classMembers.studentId))
+      .innerJoin(studentProfiles, eq(studentProfiles.studentId, userProfiles.id))
+      .where(
+        and(
+          eq(classMembers.schoolId, schoolId),
+          eq(classMembers.isActive, true),
+          sql`${nextOccurrence} > ${today}::date`,
+          sql`${nextOccurrence} <= ${today}::date + ${windowDays}::int`,
+        ),
+      )
+      .orderBy(sql`${nextOccurrence} asc`, asc(userProfiles.displayName))
+      .then((rows) => rows.map((row) => ({
+        avatar: row.avatarKind === null || row.avatarValue === null
+          ? null
+          : { kind: row.avatarKind, value: row.avatarValue },
+        classLabel: row.classLabel,
+        date: row.date,
+        id: row.id,
+        inDays: Number(row.inDays),
         name: row.name,
       })));
   }
