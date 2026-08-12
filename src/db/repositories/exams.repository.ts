@@ -1274,6 +1274,37 @@ export class DrizzleExamsRepository implements ExamsRepository {
           and cm.school_id = ${identity.schoolId}::uuid
           and cm.is_active
         join public.user_profiles up on up.id = cm.student_id
+        -- A class_members row is not proof of being a student. The QA teacher
+        -- holds an active membership of the class they teach, and without this
+        -- join they were ranked on the student leaderboard -- bottom of the
+        -- board on nil marks, because no teacher is ever sat an assessment.
+        join public.user_roles ur on ur.user_id = cm.student_id
+          and ur.school_id = ${identity.schoolId}::uuid
+          and ur.role = 'student'
+          and ur.is_active
+      ), ordered_attendance as (
+        -- The fire badge beside every row is an attendance streak: the run of
+        -- consecutive non-absent days counted back from the most recent
+        -- session. Same derivation as ranking.repository.ts so the two surfaces
+        -- cannot disagree about one student's streak.
+        select
+          record.student_id,
+          sum(case when record.status in ('present', 'late') then 0 else 1 end)
+            over (
+              partition by record.student_id
+              order by session.attendance_date desc, session.id desc
+              rows between unbounded preceding and current row
+            ) as absence_groups
+        from public.attendance_records record
+        join public.attendance_sessions session on session.id = record.session_id
+        join group_members member on member.student_id = record.student_id
+        where session.school_id = ${identity.schoolId}::uuid
+          and session.class_id = (select class_id from requester_membership)
+      ), attendance_streaks as (
+        select student_id, count(*)::int as streak_count
+        from ordered_attendance
+        where absence_groups = 0
+        group by student_id
       ), scores as (
         select er.student_id, sum(coalesce(revision.marks, er.marks))::double precision as marks
         from public.exam_results er
@@ -1294,13 +1325,22 @@ export class DrizzleExamsRepository implements ExamsRepository {
       ), ranked as (
         select gm.student_id, gm.roll_number, gm.display_name as name,
           coalesce(scores.marks, 0)::double precision as marks,
+          -- Points and streak are display columns, never rank inputs: the board
+          -- is ordered by marks alone, so a student cannot overtake another on
+          -- attendance.
+          coalesce(balance.current_points, 0)::int as points,
+          coalesce(streak.streak_count, 0)::int as streak_count,
           dense_rank() over (
             order by coalesce(scores.marks, 0) desc, gm.display_name asc, gm.student_id asc
           )::int as rank
         from group_members gm
         left join scores on scores.student_id = gm.student_id
+        left join public.point_account_balances balance
+          on balance.school_id = ${identity.schoolId}::uuid
+         and balance.user_id = gm.student_id
+        left join attendance_streaks streak on streak.student_id = gm.student_id
       )
-      select rank, name, roll_number, marks, student_id
+      select rank, name, roll_number, marks, points, streak_count, student_id
       from ranked
       ${cursorClause}
       order by marks desc, name asc, student_id asc
@@ -1309,8 +1349,10 @@ export class DrizzleExamsRepository implements ExamsRepository {
     const rows = result as unknown as ReadonlyArray<{
       marks: number | string;
       name: string;
+      points: number | string;
       rank: number | string;
       roll_number: string | null;
+      streak_count: number | string;
       student_id: string;
     }>;
     if (rows.length === 0) return undefined;
@@ -1319,10 +1361,10 @@ export class DrizzleExamsRepository implements ExamsRepository {
       isCurrentUser: row.student_id === identity.userId,
       marks: Number(row.marks),
       name: row.name,
-      points: 0 as const,
+      points: Number(row.points),
       rank: Number(row.rank),
       ...(row.roll_number === null ? {} : { rollNo: row.roll_number }),
-      streakCount: 0 as const,
+      streakCount: Number(row.streak_count),
       studentId: row.student_id,
     }));
     const last = items.at(-1);

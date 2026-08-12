@@ -675,6 +675,54 @@ describe('exam persistence hardening regressions', () => {
     expect(queries[0]).toContain('published_assessment.subject_id');
   });
 
+  // A class_members row is not proof of being a student: the QA teacher holds
+  // an active membership of the class they teach, and was ranked on the student
+  // board at the bottom on nil marks.
+  it('admits only active student roles to the leaderboard roster', async () => {
+    const { queries, repository } = createQueryRecordingRepository();
+
+    await repository.getLeaderboard(
+      { schoolId, userId: studentId }, 'group-1', { limit: 20 },
+    );
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('public.user_roles');
+    expect(queries[0]).toContain("ur.role = 'student'");
+    expect(queries[0]).toContain('ur.is_active');
+  });
+
+  // 253:7515 prints a points column and a fire streak badge on every row. Both
+  // were pinned to a literal 0 in the mapper, so the board rendered "Points. 0"
+  // and an empty badge for everyone no matter what the database held.
+  it('reads points and the attendance streak rather than emitting zero literals', async () => {
+    const { queries, repository } = createQueryRecordingRepository();
+
+    await repository.getLeaderboard(
+      { schoolId, userId: studentId }, 'group-1', { limit: 20 },
+    );
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('point_account_balances');
+    expect(queries[0]).toContain('attendance_streaks');
+    expect(queries[0]).toContain('streak_count');
+  });
+
+  // Points and streak are display columns. Ordering by them would let a student
+  // overtake another on attendance, which is not what a marks board means.
+  it('ranks on marks alone, never on points or streak', async () => {
+    const { queries, repository } = createQueryRecordingRepository();
+
+    await repository.getLeaderboard(
+      { schoolId, userId: studentId }, 'group-1', { limit: 20 },
+    );
+
+    const denseRank = /dense_rank\(\)\s*over\s*\(\s*order by([\s\S]*?)\)/.exec(queries[0] ?? '');
+    expect(denseRank).not.toBeNull();
+    expect(denseRank?.[1]).toContain('scores.marks');
+    expect(denseRank?.[1]).not.toContain('points');
+    expect(denseRank?.[1]).not.toContain('streak');
+  });
+
   it('scopes the teacher result-list query through the live assessment assignment', async () => {
     const queries: string[] = [];
     const callback: RemoteCallback = async (query) => {

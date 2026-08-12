@@ -166,10 +166,17 @@ export interface LeaderboardEntry {
   isCurrentUser: boolean;
   marks: number;
   name: string;
-  points: 0;
+  /**
+   * The student's point balance. Was pinned to the literal `0` while the board
+   * had no points source, which made every row on 253:7515 print "Points. 0".
+   * Now read from point_account_balances. Display only -- the board ranks on
+   * marks alone.
+   */
+  points: number;
   rank: number;
   rollNo?: string | undefined;
-  streakCount: 0;
+  /** Consecutive non-absent attendance days, for the fire badge on 253:7515. */
+  streakCount: number;
   studentId: string;
 }
 
