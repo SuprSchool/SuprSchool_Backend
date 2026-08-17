@@ -9,6 +9,7 @@ import { createStorageCleanupDispatcher } from '../src/config/platform-dependenc
 import {
   RecordingMediaInspectionDependencyError,
   RecordingMediaInspector,
+  RecordingMediaInspectorUnavailableError,
 } from '../src/platform/storage/recording-media-inspector.js';
 import {
   RecordingStorageCleanupHandler,
@@ -133,6 +134,52 @@ describe('trusted recording media inspection', () => {
       .rejects.toMatchObject({ retryable: true, status: 503 });
     await expect(inspector.inspect({ bucket: 'recordings', objectPath: 'school/path' }))
       .rejects.toBeInstanceOf(RecordingMediaInspectionDependencyError);
+  });
+
+  it('names the unlaunchable ffprobe binary instead of reporting a nameless outage', async () => {
+    // Regression: every teacher recording save died at audio confirmation with
+    // "Recording media inspection is temporarily unavailable" — a message that
+    // told the teacher nothing and the operator nothing about ffprobe. A host
+    // that cannot launch the binary is a misconfiguration, not an outage, and
+    // has to say so in the message that reaches the client.
+    const run = vi.fn();
+    const inspector = new RecordingMediaInspector({
+      commandRunner: { run },
+      createSignedReadUrl: vi.fn().mockResolvedValue('https://storage.example.test/private/audio.m4a?token=opaque'),
+      ffprobe: { resolve: () => ({ path: 'ffprobe', source: 'unavailable' }) },
+    });
+
+    const failure = await inspector
+      .inspect({ bucket: 'recordings', objectPath: 'school/recording-audio/id/upload' })
+      .then(() => undefined, (error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(RecordingMediaInspectorUnavailableError);
+    expect(failure).toMatchObject({ retryable: true, status: 503 });
+    expect((failure as Error).message).toContain('ffprobe');
+    // Nothing is spawned and no signed URL is minted for a binary that cannot run.
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('re-resolves the binary per inspection so a recovered host stops failing', async () => {
+    const run = vi.fn().mockResolvedValue({ exitCode: 0, stderr: '', stdout: ffprobeOutput() });
+    let available = false;
+    const inspector = new RecordingMediaInspector({
+      commandRunner: { run },
+      createSignedReadUrl: vi.fn().mockResolvedValue('https://storage.example.test/private/audio.m4a?token=opaque'),
+      ffprobe: {
+        resolve: () => (available
+          ? { path: '/packaged/ffprobe', source: 'bundled' as const }
+          : { path: 'ffprobe', source: 'unavailable' as const }),
+      },
+    });
+    const target = { bucket: 'recordings', objectPath: 'school/recording-audio/id/upload' };
+
+    await expect(inspector.inspect(target)).rejects.toBeInstanceOf(RecordingMediaInspectorUnavailableError);
+
+    available = true;
+
+    await expect(inspector.inspect(target)).resolves.toMatchObject({ codec: 'aac-lc' });
+    expect(run).toHaveBeenCalledWith('/packaged/ffprobe', expect.any(Array), expect.any(Object));
   });
 
   it('limits concurrent ffprobe executions to two', async () => {

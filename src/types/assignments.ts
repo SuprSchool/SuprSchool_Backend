@@ -174,7 +174,13 @@ export interface CreateAssignmentInput {
   instructions: string;
   isGradedAssignment: boolean;
   maxMarks?: number | undefined;
-  rubrics: ReadonlyArray<AssignmentRubric>;
+  /**
+   * Absent means "no rubric breakdown". On an update that is deliberately
+   * distinct from `[]`: absent leaves whatever breakdown is already stored
+   * alone, `[]` clears it. A PATCH that simply omits the key must not silently
+   * destroy rubrics the teacher never touched.
+   */
+  rubrics?: ReadonlyArray<AssignmentRubric> | undefined;
   subjectId: string;
   title: string;
 }

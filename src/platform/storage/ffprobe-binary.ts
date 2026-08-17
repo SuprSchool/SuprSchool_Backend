@@ -76,3 +76,33 @@ export function resolveFfprobeBinary(
 
   return { path: configuredPath, source: 'unavailable' };
 }
+
+/** Answers "which binary do I launch right now?" for one inspection. */
+export interface FfprobeBinaryResolver {
+  resolve(): FfprobeResolution;
+}
+
+/**
+ * Resolving once at boot and pinning the answer made a single unavailable
+ * outcome permanent: a host that had not installed the packaged binary yet, or
+ * whose probe timed out while the machine was loaded, then failed *every*
+ * recording save for the life of the process with no way back but a restart.
+ *
+ * A launchable answer is still cached — the probe spawns an ~80 MB executable
+ * and must not run per confirmation — but an unavailable one is retried, so the
+ * pipeline recovers on its own as soon as a binary exists.
+ */
+export function createFfprobeBinaryResolver(
+  configuredPath: string,
+  options: ResolveFfprobeBinaryOptions = {},
+): FfprobeBinaryResolver {
+  let cached: FfprobeResolution | undefined;
+
+  return {
+    resolve(): FfprobeResolution {
+      if (cached !== undefined && cached.source !== 'unavailable') return cached;
+      cached = resolveFfprobeBinary(configuredPath, options);
+      return cached;
+    },
+  };
+}

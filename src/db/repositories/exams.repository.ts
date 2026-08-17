@@ -567,13 +567,18 @@ export class DrizzleExamsRepository implements ExamsRepository {
     `) as unknown as ReadonlyArray<{ id: string }>;
     const created = rows[0];
     if (created === undefined) return undefined;
-    await transaction.insert(examRubrics).values(input.rubrics.map((rubric) => ({
-      assessmentId: created.id,
-      description: rubric.description,
-      marks: rubric.marks,
-      position: rubric.position,
-      sectionTitle: rubric.sectionTitle,
-    })));
+    // Section breakdowns are optional, and Drizzle throws on `values([])`
+    // rather than writing nothing, so the absence is handled here.
+    const rubrics = input.rubrics ?? [];
+    if (rubrics.length > 0) {
+      await transaction.insert(examRubrics).values(rubrics.map((rubric) => ({
+        assessmentId: created.id,
+        description: rubric.description,
+        marks: rubric.marks,
+        position: rubric.position,
+        sectionTitle: rubric.sectionTitle,
+      })));
+    }
     return created.id;
     });
     return assessmentId === undefined ? undefined : this.findManagedAssessment(identity, assessmentId);
@@ -627,14 +632,21 @@ export class DrizzleExamsRepository implements ExamsRepository {
       `) as unknown as ReadonlyArray<{ id: string }>;
       const assessment = rows[0];
       if (assessment === undefined) return undefined;
-      await transaction.delete(examRubrics).where(eq(examRubrics.assessmentId, assessment.id));
-      await transaction.insert(examRubrics).values(input.rubrics.map((rubric) => ({
-        assessmentId: assessment.id,
-        description: rubric.description,
-        marks: rubric.marks,
-        position: rubric.position,
-        sectionTitle: rubric.sectionTitle,
-      })));
+      // Omitted means "leave the stored breakdown alone" — the
+      // delete-then-reinsert is destructive, so it only runs when the caller
+      // stated one. An explicit `[]` still clears it.
+      if (input.rubrics !== undefined) {
+        await transaction.delete(examRubrics).where(eq(examRubrics.assessmentId, assessment.id));
+        if (input.rubrics.length > 0) {
+          await transaction.insert(examRubrics).values(input.rubrics.map((rubric) => ({
+            assessmentId: assessment.id,
+            description: rubric.description,
+            marks: rubric.marks,
+            position: rubric.position,
+            sectionTitle: rubric.sectionTitle,
+          })));
+        }
+      }
       return assessment.id;
     });
     return updated === undefined ? undefined : this.findManagedAssessment(identity, updated);

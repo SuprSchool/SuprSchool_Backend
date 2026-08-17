@@ -39,6 +39,13 @@ const validAssignment = {
   rubrics: [{ position: 1, topic: 'Solutions', marks: 10 }],
 };
 
+/** The same fixture with no `rubrics` key at all — a "no breakdown" body. */
+const assignmentWithoutRubrics: Omit<typeof validAssignment, 'rubrics'> = (() => {
+  const copy: Record<string, unknown> = { ...validAssignment };
+  delete copy.rubrics;
+  return copy as Omit<typeof validAssignment, 'rubrics'>;
+})();
+
 function createService(): AssignmentsService {
   return {
     confirmResource: vi.fn(),
@@ -115,6 +122,52 @@ describe('assignments router', () => {
     expect(service.create).toHaveBeenCalledWith(
       { schoolId, userId: teacherId }, classRouteId, validAssignment, 'assignment-create-1',
     );
+  });
+
+  it('accepts an assignment created without any rubric breakdown', async () => {
+    const service = createService();
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp).post('/teacher/classes/' + classRouteId + '/assignments')
+      .set('Idempotency-Key', 'assignment-create-no-rubrics')
+      .send(assignmentWithoutRubrics).expect(201);
+
+    expect(service.create).toHaveBeenCalledWith(
+      { schoolId, userId: teacherId }, classRouteId, assignmentWithoutRubrics, 'assignment-create-no-rubrics',
+    );
+    // Absent must reach the service as absent, so the repository can tell it
+    // apart from an explicit `[]`.
+    expect(vi.mocked(service.create).mock.calls[0]?.[2]).not.toHaveProperty('rubrics');
+  });
+
+  it('accepts an alphabetic assignment created without any rubric breakdown', async () => {
+    const service = createService();
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp).post('/teacher/classes/' + classRouteId + '/assignments')
+      .set('Idempotency-Key', 'assignment-create-alphabetic-no-rubrics')
+      .send({
+        dueAt: validAssignment.dueAt,
+        gradingType: 'Alphabetic',
+        instructions: validAssignment.instructions,
+        isGradedAssignment: true,
+        subjectId: validAssignment.subjectId,
+        title: validAssignment.title,
+      }).expect(201);
+
+    expect(service.create).toHaveBeenCalled();
+  });
+
+  it('still rejects a rubric breakdown whose marks do not total maxMarks', async () => {
+    const service = createService();
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp).post('/teacher/classes/' + classRouteId + '/assignments')
+      .set('Idempotency-Key', 'assignment-create-bad-total')
+      .send({ ...validAssignment, rubrics: [{ position: 1, topic: 'Solutions', marks: 3 }] })
+      .expect(400);
+
+    expect(service.create).not.toHaveBeenCalled();
   });
 
   it('hydrates a teacher assignment detail through the authenticated tenant identity', async () => {
@@ -1069,6 +1122,147 @@ describe('assignment display codes and due timestamps', () => {
     );
 
     expect(page.items[0]?.dueAt).toBe('2026-04-05T22:00:00.000Z');
+  });
+
+  describe('optional rubric breakdowns', () => {
+    // `update ... returning` hands back every column in schema order; the
+    // repository only reads `id` off it, but it has to be a real row or the
+    // update short-circuits before it ever reaches the rubric handling.
+    const updatedAssignmentRow = [
+      assignmentRouteId,                     // id
+      schoolId,                              // schoolId
+      classRouteId,                          // classId
+      validAssignment.subjectId,             // subjectId
+      teacherId,                             // teacherId
+      validAssignment.title,                 // title
+      validAssignment.instructions,          // instructions
+      `${displayCodePrefix}013`,             // displayCode
+      new Date('2026-04-05T22:00:00.000Z'),  // dueAt
+      true,                                  // isGraded
+      'Numeric',                             // gradingType
+      10,                                    // maxMarks
+      null,                                  // deletedAt
+      new Date('2026-03-01T09:00:00.000Z'),  // createdAt
+      new Date('2026-03-01T09:00:00.000Z'),  // updatedAt
+    ];
+
+    /** Every statement the repository issues, in order. */
+    function recordingDatabase(statements: string[]): Database {
+      return databaseWithTransaction(async (query) => {
+        statements.push(query);
+        if (query.includes('insert into public.assignments')) return { rows: [[assignmentRouteId]] };
+        if (query.includes('update "assignments"')) return { rows: [updatedAssignmentRow] };
+        return { rows: [] };
+      });
+    }
+
+    it('writes an assignment with no rubric rows rather than throwing on an empty insert', async () => {
+      const statements: string[] = [];
+      const repository = new DrizzleAssignmentsRepository(recordingDatabase(statements));
+
+      await repository.create(
+        { schoolId, userId: teacherId },
+        classRouteId,
+        assignmentWithoutRubrics as Parameters<AssignmentsRepository['create']>[2],
+      );
+
+      expect(statements.some((statement) => statement.includes('insert into public.assignments'))).toBe(true);
+      expect(statements.some((statement) => statement.includes('insert into "assignment_rubrics"'))).toBe(false);
+    });
+
+    it('leaves stored rubrics untouched when an update omits them', async () => {
+      const statements: string[] = [];
+      const repository = new DrizzleAssignmentsRepository(recordingDatabase(statements));
+
+      await repository.update(
+        { schoolId, userId: teacherId },
+        assignmentRouteId,
+        assignmentWithoutRubrics as Parameters<AssignmentsRepository['update']>[2],
+      );
+
+      // The destructive half of delete-then-reinsert must not run.
+      expect(statements.some((statement) => statement.includes('delete from "assignment_rubrics"'))).toBe(false);
+      expect(statements.some((statement) => statement.includes('insert into "assignment_rubrics"'))).toBe(false);
+    });
+
+    it('clears stored rubrics when an update states an empty breakdown', async () => {
+      const statements: string[] = [];
+      const repository = new DrizzleAssignmentsRepository(recordingDatabase(statements));
+
+      await repository.update(
+        { schoolId, userId: teacherId },
+        assignmentRouteId,
+        { ...validAssignment, rubrics: [] } as Parameters<AssignmentsRepository['update']>[2],
+      );
+
+      expect(statements.some((statement) => statement.includes('delete from "assignment_rubrics"'))).toBe(true);
+      expect(statements.some((statement) => statement.includes('insert into "assignment_rubrics"'))).toBe(false);
+    });
+  });
+
+  /**
+   * The authoring form ships the "Graded Assignment" toggle switched on, so
+   * `is_graded` is true on nearly everything a teacher creates. Deriving the
+   * Active/Graded tabs from that column filed each new assignment under Graded
+   * the moment it was written — and the Graded tab prunes to a single due date,
+   * so a teacher who had just created one saw it in neither tab. The tabs are
+   * grading progress; `graded_at` on a submission is what states it.
+   */
+  describe('teacher Active/Graded derivation', () => {
+    async function captureListSql(status: 'active' | 'graded'): Promise<string> {
+      let captured = '';
+      const callback: RemoteCallback = async (query) => {
+        captured = query;
+        return { rows: [] };
+      };
+      const repository = new DrizzleAssignmentsRepository(
+        drizzle(callback) as unknown as Database,
+      );
+      await repository.listForTeacher(
+        { schoolId, userId: teacherId },
+        classRouteId,
+        { limit: 20, status },
+      );
+      return captured;
+    }
+
+    it('files an assignment under Active until one of its submissions is graded', async () => {
+      const sql = await captureListSql('active');
+
+      expect(sql).toContain('graded_at');
+      expect(sql).toContain('assignment_submissions');
+      expect(sql).toContain('not exists');
+      // The creation-time toggle must not decide the tab.
+      expect(sql).not.toMatch(/"is_graded"\s*=\s*\$/);
+    });
+
+    it('files an assignment under Graded once one of its submissions is graded', async () => {
+      const sql = await captureListSql('graded');
+
+      expect(sql).toContain('graded_at');
+      expect(sql).toContain('assignment_submissions');
+      expect(sql).not.toContain('not exists');
+      expect(sql).not.toMatch(/"is_graded"\s*=\s*\$/);
+    });
+
+    it('leaves both tabs unfiltered when no status is requested', async () => {
+      let captured = '';
+      const callback: RemoteCallback = async (query) => {
+        captured = query;
+        return { rows: [] };
+      };
+      const repository = new DrizzleAssignmentsRepository(
+        drizzle(callback) as unknown as Database,
+      );
+
+      await repository.listForTeacher(
+        { schoolId, userId: teacherId },
+        classRouteId,
+        { limit: 20 },
+      );
+
+      expect(captured).not.toContain('graded_at');
+    });
   });
 });
 

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { AppError } from '../../lib/errors.js';
+import type { FfprobeBinaryResolver } from './ffprobe-binary.js';
 
 export const FFPROBE_TIMEOUT_MILLISECONDS = 30_000;
 export const FFPROBE_MAX_CONCURRENT_PROCESSES = 2;
@@ -83,6 +84,11 @@ export type SignedReadUrlCreator = (
 export interface RecordingMediaInspectorOptions {
   commandRunner: CommandRunner;
   createSignedReadUrl: SignedReadUrlCreator;
+  /**
+   * Re-resolved per inspection so a host that gains ffprobe stops failing
+   * without a restart. `ffprobePath` remains for a fixed, known-good binary.
+   */
+  ffprobe?: FfprobeBinaryResolver;
   ffprobePath?: string;
   maxConcurrentProcesses?: number;
   timeoutMilliseconds?: number;
@@ -95,6 +101,28 @@ export class RecordingMediaInspectionDependencyError extends AppError {
     super('INTERNAL_ERROR', 503, 'Recording media inspection is temporarily unavailable');
     this.name = 'RecordingMediaInspectionDependencyError';
     if (cause !== undefined) this.cause = cause;
+  }
+}
+
+/**
+ * A host with no launchable ffprobe is misconfigured, not briefly unwell, and
+ * every recording save on it dies at audio confirmation. The generic wrapper
+ * above says "temporarily unavailable", which sends the teacher away to retry
+ * something that can never succeed and tells the operator nothing; this one
+ * names the binary and the setting so the failure is actionable from the
+ * message alone. It stays a retryable 503 so the idempotency claim is released
+ * and the very next request after a fix goes through.
+ */
+export class RecordingMediaInspectorUnavailableError extends AppError {
+  public readonly retryable = true;
+
+  public constructor(configuredPath: string) {
+    super(
+      'INTERNAL_ERROR',
+      503,
+      `Recording audio cannot be verified: the ffprobe binary could not be launched from "${configuredPath}" and no packaged binary is installed. Install ffprobe (or run npm install to restore @ffprobe-installer/ffprobe) and set FFPROBE_PATH.`,
+    );
+    this.name = 'RecordingMediaInspectorUnavailableError';
   }
 }
 
@@ -151,12 +179,14 @@ interface FfprobeOutput {
 }
 
 export class RecordingMediaInspector {
-  private readonly ffprobePath: string;
+  private readonly ffprobe: FfprobeBinaryResolver;
   private readonly gate: ConcurrencyGate;
   private readonly timeoutMilliseconds: number;
 
   public constructor(private readonly options: RecordingMediaInspectorOptions) {
-    this.ffprobePath = options.ffprobePath ?? 'ffprobe';
+    const fixedPath = options.ffprobePath ?? 'ffprobe';
+    this.ffprobe = options.ffprobe
+      ?? { resolve: () => ({ path: fixedPath, source: 'configured' }) };
     this.timeoutMilliseconds = options.timeoutMilliseconds ?? FFPROBE_TIMEOUT_MILLISECONDS;
     const concurrency = options.maxConcurrentProcesses ?? FFPROBE_MAX_CONCURRENT_PROCESSES;
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > FFPROBE_MAX_CONCURRENT_PROCESSES) {
@@ -167,6 +197,12 @@ export class RecordingMediaInspector {
 
   public inspect(input: { bucket: string; objectPath: string }): Promise<RecordingMediaInspection> {
     return this.gate.run(async () => {
+      // Checked before the signed URL is minted: an unlaunchable binary cannot
+      // be salvaged by anything downstream, and this failure has its own name.
+      const binary = this.ffprobe.resolve();
+      if (binary.source === 'unavailable') {
+        throw new RecordingMediaInspectorUnavailableError(binary.path);
+      }
       try {
         const signedUrl = await this.options.createSignedReadUrl(
           input.bucket,
@@ -174,7 +210,7 @@ export class RecordingMediaInspector {
           SIGNED_READ_URL_TTL_SECONDS,
         );
         const result = await this.options.commandRunner.run(
-          this.ffprobePath,
+          binary.path,
           [
             '-v', 'error',
             '-show_entries', 'format=duration,bit_rate,format_name:stream=codec_name,profile,channels,bit_rate',
@@ -188,6 +224,7 @@ export class RecordingMediaInspector {
         }
         return parseFfprobeOutput(result.stdout);
       } catch (error) {
+        if (error instanceof RecordingMediaInspectorUnavailableError) throw error;
         if (error instanceof RecordingMediaInspectionDependencyError) throw error;
         throw new RecordingMediaInspectionDependencyError(error);
       }

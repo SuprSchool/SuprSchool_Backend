@@ -7,6 +7,7 @@ import {
   isNotNull,
   isNull,
   lt,
+  not,
   or,
   sql,
 } from 'drizzle-orm';
@@ -516,8 +517,15 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         eq(assignments.teacherId, identity.userId),
         isNull(assignments.deletedAt),
         this.teacherAssignment(identity, assignments.classId, assignments.subjectId),
-        query.status === 'active' ? eq(assignments.isGraded, false) : undefined,
-        query.status === 'graded' ? eq(assignments.isGraded, true) : undefined,
+        // Active vs Graded is grading PROGRESS, not the creation-time
+        // "Graded Assignment" toggle stored in `is_graded`. Reading the toggle
+        // filed every assignment the authoring form created with grading on
+        // (its default) under Graded the instant it was written, so a teacher
+        // who had just created one found it in neither tab — Active excluded it
+        // by the toggle, and the Graded tab's own due-date filter excluded it
+        // again unless it happened to be due that very day.
+        query.status === 'active' ? not(this.hasGradedSubmission(identity)) : undefined,
+        query.status === 'graded' ? this.hasGradedSubmission(identity) : undefined,
         cursor === undefined ? undefined : or(
           lt(assignments.createdAt, new Date(cursor.createdAt)),
           and(
@@ -643,13 +651,19 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       `);
       const assignment = (createdRows as unknown as ReadonlyArray<{ id: string }>)[0];
       if (assignment === undefined) return undefined;
-      await transaction.insert(assignmentRubrics).values(input.rubrics.map((rubric) => ({
-        assignmentId: assignment.id,
-        marks: rubric.marks,
-        ...(rubric.moreInfo === undefined ? {} : { moreInfo: rubric.moreInfo }),
-        position: rubric.position,
-        topic: rubric.topic,
-      })));
+      // Rubrics are optional, and Drizzle throws on an empty `values([])`
+      // rather than writing nothing — so the absence has to be handled here
+      // instead of being pushed into the driver.
+      const rubrics = input.rubrics ?? [];
+      if (rubrics.length > 0) {
+        await transaction.insert(assignmentRubrics).values(rubrics.map((rubric) => ({
+          assignmentId: assignment.id,
+          marks: rubric.marks,
+          ...(rubric.moreInfo === undefined ? {} : { moreInfo: rubric.moreInfo }),
+          position: rubric.position,
+          topic: rubric.topic,
+        })));
+      }
       return assignment.id;
     });
   }
@@ -682,14 +696,22 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         ))
         .returning();
       if (assignment === undefined) return undefined;
-      await transaction.delete(assignmentRubrics).where(eq(assignmentRubrics.assignmentId, assignment.id));
-      await transaction.insert(assignmentRubrics).values(input.rubrics.map((rubric) => ({
-        assignmentId: assignment.id,
-        marks: rubric.marks,
-        ...(rubric.moreInfo === undefined ? {} : { moreInfo: rubric.moreInfo }),
-        position: rubric.position,
-        topic: rubric.topic,
-      })));
+      // An omitted `rubrics` key is "leave the breakdown as it is", not "wipe
+      // it": the delete-then-reinsert below is destructive, so it only runs
+      // when the caller actually stated a breakdown. An explicit `[]` still
+      // clears, which is how a teacher removes one.
+      if (input.rubrics !== undefined) {
+        await transaction.delete(assignmentRubrics).where(eq(assignmentRubrics.assignmentId, assignment.id));
+        if (input.rubrics.length > 0) {
+          await transaction.insert(assignmentRubrics).values(input.rubrics.map((rubric) => ({
+            assignmentId: assignment.id,
+            marks: rubric.marks,
+            ...(rubric.moreInfo === undefined ? {} : { moreInfo: rubric.moreInfo }),
+            position: rubric.position,
+            topic: rubric.topic,
+          })));
+        }
+      }
       return assignment;
     });
     return updated === undefined ? undefined : this.withDetails(updated);
@@ -1355,6 +1377,25 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         eq(classMembers.classId, assignments.classId),
         eq(classMembers.studentId, identity.userId),
         eq(classMembers.isActive, true),
+      )));
+  }
+
+  /**
+   * Whether the teacher has graded anyone on this assignment yet. `graded_at`
+   * is written only by the grading endpoint, and the table's own check
+   * constraint keeps it in step with `marks`, so a single graded submission is
+   * an unambiguous "grading has started here". A freshly created assignment has
+   * no submissions at all, so it is Active by construction — which is the whole
+   * point of deriving the tab from this rather than from `is_graded`.
+   */
+  private hasGradedSubmission(identity: AssignmentIdentity) {
+    return exists(this.db
+      .select({ id: assignmentSubmissions.id })
+      .from(assignmentSubmissions)
+      .where(and(
+        eq(assignmentSubmissions.schoolId, identity.schoolId),
+        eq(assignmentSubmissions.assignmentId, assignments.id),
+        isNotNull(assignmentSubmissions.gradedAt),
       )));
   }
 

@@ -162,27 +162,50 @@ export class DrizzleRankingRepository implements RankingRepository {
       };
     }
 
+    // A snapshot is immutable, so a roster defect that was written into one
+    // survives every later read of it: the board this school is carrying still
+    // seats the class teacher at rank 1 on their own point balance. The same
+    // active-student guard the refresh now applies is repeated here so an
+    // already-written snapshot stops publishing a teacher without waiting on a
+    // refresh, and the rank the client sees is re-derived over what is left so
+    // removing a row cannot leave a hole where the top of the podium was.
     const entryRows = rows<RankingEntryRow>(await this.db.execute(sql`
+      with board as (
+        select
+          entry.rank as stored_rank,
+          entry.user_id,
+          profile.display_name as name,
+          membership.roll_number,
+          entry.points,
+          entry.marks,
+          entry.streak_count
+        from public.ranking_entries as entry
+        join public.user_profiles as profile
+          on profile.id = entry.user_id
+         and profile.school_id = entry.school_id
+        join public.user_roles as student_role
+          on student_role.user_id = entry.user_id
+         and student_role.school_id = entry.school_id
+         and student_role.role = 'student'
+         and student_role.is_active
+        left join public.class_members as membership
+          on membership.school_id = entry.school_id
+         and membership.class_id = ${activeClass.classId}::uuid
+         and membership.student_id = entry.user_id
+         and membership.is_active = true
+        where entry.snapshot_id = ${snapshot.id}::uuid
+          and entry.school_id = ${identity.schoolId}::uuid
+      )
       select
-        entry.rank,
-        entry.user_id as "userId",
-        profile.display_name as name,
-        membership.roll_number as "rollNumber",
-        entry.points,
-        entry.marks,
-        entry.streak_count as "streakCount"
-      from public.ranking_entries as entry
-      join public.user_profiles as profile
-        on profile.id = entry.user_id
-       and profile.school_id = entry.school_id
-      left join public.class_members as membership
-        on membership.school_id = entry.school_id
-       and membership.class_id = ${activeClass.classId}::uuid
-       and membership.student_id = entry.user_id
-       and membership.is_active = true
-      where entry.snapshot_id = ${snapshot.id}::uuid
-        and entry.school_id = ${identity.schoolId}::uuid
-      order by entry.rank asc, entry.user_id asc
+        dense_rank() over (order by stored_rank asc)::integer as rank,
+        user_id as "userId",
+        name,
+        roll_number as "rollNumber",
+        points,
+        marks,
+        streak_count as "streakCount"
+      from board
+      order by rank asc, "userId" asc
     `));
 
     return {
@@ -375,6 +398,17 @@ export class DrizzleRankingRepository implements RankingRepository {
         join public.user_profiles as profile
           on profile.id = membership.student_id
          and profile.school_id = membership.school_id
+        -- A class_members row is not proof of being a student. The QA teacher
+        -- holds an active membership of the class they teach, and without this
+        -- join they were ranked on the student board -- top of it, in fact,
+        -- because this scope orders by points first and a teacher accrues
+        -- points without ever sitting an assessment. Same guard the exams
+        -- leaderboard roster carries.
+        join public.user_roles as student_role
+          on student_role.user_id = membership.student_id
+         and student_role.school_id = membership.school_id
+         and student_role.role = 'student'
+         and student_role.is_active
         where membership.school_id = ${scope.schoolId}::uuid
           and membership.class_id = ${scope.classId}::uuid
           and membership.is_active = true

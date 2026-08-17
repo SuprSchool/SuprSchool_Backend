@@ -192,7 +192,13 @@ export type UpdateExamGroupInput = CreateExamGroupInput;
 export interface CreateExamAssessmentInput {
   endsAt: string;
   maxMarks: number;
-  rubrics: ReadonlyArray<ExamRubric>;
+  /**
+   * Absent means "no section breakdown". On an update that is deliberately
+   * distinct from `[]`: absent leaves the stored breakdown alone, `[]` clears
+   * it, so a PATCH that omits the key cannot destroy sections the teacher
+   * never touched.
+   */
+  rubrics?: ReadonlyArray<ExamRubric> | undefined;
   scheduledOn: string;
   startsAt: string;
   subjectId: string;

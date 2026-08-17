@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 
+import { TIMETABLE_TIME_ZONE, isoDateInTimeZone } from '../../lib/school-time.js';
 import type { Database } from '../client.js';
 import {
   academicYears,
@@ -64,6 +65,24 @@ interface ScheduleSlotRow {
 
 function toIsoDate(value: Date): string {
   return value.toISOString().slice(0, 10);
+}
+
+/**
+ * Today, on the school's wall clock rather than the server's.
+ *
+ * A birthday is a calendar-day fact and the calendar that decides it is the
+ * school's. The database session runs in UTC, so `toIsoDate` reads *yesterday*
+ * between 00:00 and 05:30 IST: at 02:45 on 17 August the birthday queries asked
+ * for `08-16`, and all eighteen students whose birthday it actually was fell
+ * out of the result. Both dashboards then drew the band's "no birthdays today"
+ * state, which reads as a missing feature rather than as a clock disagreement.
+ *
+ * Only the birthday queries move here. `toIsoDate` stays correct for the
+ * calendar-range round trip, whose inputs are ISO strings parsed at midnight
+ * UTC in the first place.
+ */
+function schoolToday(now: Date): string {
+  return isoDateInTimeZone(now, TIMETABLE_TIME_ZONE);
 }
 
 function fromIsoDate(value: string): Date {
@@ -160,7 +179,7 @@ export class DrizzleStudentHomeRepository implements StudentHomeRepository {
     schoolId: string,
     now: Date,
   ): Promise<StudentHomeBirthday[]> {
-    const monthDay = toIsoDate(now).slice(5);
+    const monthDay = schoolToday(now).slice(5);
     return this.db
       .select({
         avatarKind: userProfiles.avatarKind,
@@ -223,7 +242,7 @@ export class DrizzleStudentHomeRepository implements StudentHomeRepository {
     now: Date,
     windowDays: number,
   ): Promise<StudentHomeUpcomingBirthday[]> {
-    const today = toIsoDate(now);
+    const today = schoolToday(now);
     const nextOccurrence = sql`
       case
         when (${studentProfiles.dateOfBirth} + make_interval(years =>
@@ -386,7 +405,7 @@ export class DrizzleStudentHomeRepository implements StudentHomeRepository {
     context: StudentClassContext,
     now: Date,
   ): Promise<StudentHomeResponse['birthdays']> {
-    const monthDay = toIsoDate(now).slice(5);
+    const monthDay = schoolToday(now).slice(5);
     return this.db
       .select({
         avatarKind: userProfiles.avatarKind,

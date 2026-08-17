@@ -260,6 +260,40 @@ describe('exams router', () => {
     );
   });
 
+  it('accepts an assessment created without any section breakdown', async () => {
+    const service = createService();
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp).post(`/teacher/exam-groups/${groupRouteId}/assessments`)
+      .set('Idempotency-Key', 'exam-assessment-create-no-rubrics')
+      .send(assessmentWithoutRubrics)
+      .expect(201);
+
+    expect(service.createAssessment).toHaveBeenCalledWith(
+      { schoolId, userId: teacherId },
+      groupRouteId,
+      assessmentWithoutRubrics,
+      'exam-assessment-create-no-rubrics',
+    );
+    // Absent must stay absent, so the repository can tell it from an explicit [].
+    expect(vi.mocked(service.createAssessment).mock.calls[0]?.[2]).not.toHaveProperty('rubrics');
+  });
+
+  it('still rejects a section breakdown whose marks do not total maxMarks', async () => {
+    const service = createService();
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp).post(`/teacher/exam-groups/${groupRouteId}/assessments`)
+      .set('Idempotency-Key', 'exam-assessment-create-bad-total')
+      .send({
+        ...assessmentInput,
+        rubrics: [{ description: 'Working', marks: 40, position: 1, sectionTitle: 'Solutions' }],
+      })
+      .expect(400);
+
+    expect(service.createAssessment).not.toHaveBeenCalled();
+  });
+
   it('routes individual and all non-submitted exam reminders', async () => {
     const service = createService();
     vi.mocked(service.remindStudent).mockResolvedValue({ studentId });
@@ -373,6 +407,13 @@ const assessmentInput = {
   subjectId: subjectRouteId,
   title: 'Mathematics',
 };
+
+/** The same fixture with no `rubrics` key at all — a "no breakdown" body. */
+const assessmentWithoutRubrics: Omit<typeof assessmentInput, 'rubrics'> = (() => {
+  const copy: Record<string, unknown> = { ...assessmentInput };
+  delete copy.rubrics;
+  return copy as Omit<typeof assessmentInput, 'rubrics'>;
+})();
 
 function createQueryRecordingRepository() {
   const queries: string[] = [];
@@ -952,6 +993,65 @@ describe('exam re-review hardening regressions', () => {
 
     expect(writes).toEqual(['transaction']);
     expect(rolledBack).toBe(true);
+  });
+
+  /**
+   * A section breakdown is optional. Drizzle throws on `values([])` rather than
+   * writing nothing, so "no breakdown" has to be handled before the driver; and
+   * an update that omits the key must not wipe sections the teacher never
+   * touched, because the update path is delete-then-reinsert.
+   */
+  describe('optional exam section breakdowns', () => {
+    function recordingRepository() {
+      const operations: string[] = [];
+      const transaction = {
+        execute: async () => {
+          operations.push('execute');
+          return [{ id: 'assessment-1' }];
+        },
+        delete: () => {
+          operations.push('delete-rubrics');
+          return { where: async () => undefined };
+        },
+        insert: () => {
+          operations.push('insert-rubrics');
+          return { values: async () => undefined };
+        },
+      };
+      // A real drizzle instance backs the post-transaction re-read; only the
+      // transaction body is swapped for the recorder.
+      const database = drizzle((async () => ({ rows: [] })) as RemoteCallback) as unknown as Database;
+      Object.assign(database, {
+        transaction: async (work: (value: never) => Promise<unknown>) => work(transaction as never),
+      });
+      return { operations, repository: new DrizzleExamsRepository(database) };
+    }
+
+    it('writes an assessment with no rubric rows rather than throwing on an empty insert', async () => {
+      const { operations, repository } = recordingRepository();
+
+      await repository.createAssessment(examIdentity, 'group-1', assessmentWithoutRubrics);
+
+      expect(operations).toEqual(['execute']);
+    });
+
+    it('leaves stored sections untouched when an update omits them', async () => {
+      const { operations, repository } = recordingRepository();
+
+      await repository.updateAssessment(examIdentity, 'assessment-1', assessmentWithoutRubrics);
+
+      expect(operations).not.toContain('delete-rubrics');
+      expect(operations).not.toContain('insert-rubrics');
+    });
+
+    it('clears stored sections when an update states an empty breakdown', async () => {
+      const { operations, repository } = recordingRepository();
+
+      await repository.updateAssessment(examIdentity, 'assessment-1', { ...assessmentInput, rubrics: [] });
+
+      expect(operations).toContain('delete-rubrics');
+      expect(operations).not.toContain('insert-rubrics');
+    });
   });
 
   it('returns the latest published result revision to the student assessment detail', async () => {

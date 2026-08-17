@@ -78,17 +78,23 @@ export const createAssignmentSchema = z.object({
   instructions: trimmedText(1, 10_000),
   isGradedAssignment: z.boolean(),
   maxMarks: z.coerce.number().finite().optional(),
-  rubrics: z.array(rubricSchema).min(1).max(100),
+  // A rubric breakdown is an optional aid, not part of what makes an
+  // assignment well formed: a teacher may publish one and grade it against the
+  // maximum alone. Omitting the key entirely and sending `[]` both mean "no
+  // breakdown"; the totalling rules below only bind once a breakdown exists.
+  rubrics: z.array(rubricSchema).max(100).optional(),
   subjectId: z.uuid(),
   title: trimmedText(1, 160),
 }).superRefine((input, context) => {
-  const rubricTotal = input.rubrics.reduce((total, rubric) => total + rubric.marks, 0);
+  const rubrics = input.rubrics ?? [];
+  const hasRubrics = rubrics.length > 0;
+  const rubricTotal = rubrics.reduce((total, rubric) => total + rubric.marks, 0);
   if (input.gradingType === 'Numeric') {
     if (input.maxMarks === undefined || input.maxMarks <= 0) {
       context.addIssue({ code: 'custom', message: 'Numeric assignments require maxMarks greater than zero', path: ['maxMarks'] });
       return;
     }
-    if (Math.abs(rubricTotal - input.maxMarks) > Number.EPSILON * 100) {
+    if (hasRubrics && Math.abs(rubricTotal - input.maxMarks) > Number.EPSILON * 100) {
       context.addIssue({ code: 'custom', message: 'Numeric rubric marks must total maxMarks', path: ['rubrics'] });
     }
     return;
@@ -96,7 +102,7 @@ export const createAssignmentSchema = z.object({
   if (input.maxMarks !== undefined) {
     context.addIssue({ code: 'custom', message: 'Alphabetic assignments do not accept maxMarks', path: ['maxMarks'] });
   }
-  if (rubricTotal !== 0) {
+  if (hasRubrics && rubricTotal !== 0) {
     context.addIssue({ code: 'custom', message: 'Alphabetic rubric marks must be zero', path: ['rubrics'] });
   }
 });

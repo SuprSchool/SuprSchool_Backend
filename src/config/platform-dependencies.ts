@@ -29,7 +29,7 @@ import {
   NodeCommandRunner,
   RecordingMediaInspector,
 } from "../platform/storage/recording-media-inspector.js";
-import { resolveFfprobeBinary } from "../platform/storage/ffprobe-binary.js";
+import { createFfprobeBinaryResolver } from "../platform/storage/ffprobe-binary.js";
 import {
   DatabaseRecordingCleanupStore,
   RecordingStorageCleanupHandler,
@@ -144,11 +144,15 @@ export function createRuntimePlatformDependencies(
     },
   );
   const queue = new PgmqQueueClient(db);
-  const ffprobe = resolveFfprobeBinary(env.FFPROBE_PATH);
+  // Resolved through a caching resolver rather than a single boot-time call:
+  // a launchable binary is probed once, but an unavailable outcome is retried
+  // on the next inspection so the recordings pipeline is not dead until restart.
+  const ffprobeResolver = createFfprobeBinaryResolver(env.FFPROBE_PATH);
+  const ffprobe = ffprobeResolver.resolve();
   if (ffprobe.source === "unavailable") {
     logger.error(
       { configuredFfprobePath: env.FFPROBE_PATH },
-      "ffprobe could not be launched from FFPROBE_PATH and no packaged binary is installed; recording audio confirmation will fail until one is available",
+      "ffprobe could not be launched from FFPROBE_PATH and no packaged binary is installed; every teacher recording save will fail at audio confirmation until one is available",
     );
   } else if (ffprobe.source === "bundled") {
     logger.warn(
@@ -178,7 +182,7 @@ export function createRuntimePlatformDependencies(
       }
       return data.signedUrl;
     },
-    ffprobePath: ffprobe.path,
+    ffprobe: ffprobeResolver,
   });
   const recordingStorage = new SupabaseRecordingStorageAdapter({
     inspector: recordingMediaInspector,

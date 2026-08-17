@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   bundledFfprobePath,
   canLaunchFfprobe,
+  createFfprobeBinaryResolver,
   resolveFfprobeBinary,
 } from '../src/platform/storage/ffprobe-binary.js';
 import {
@@ -52,6 +53,38 @@ describe('ffprobe binary resolution', () => {
 
   it('does not treat a missing binary as launchable', () => {
     expect(canLaunchFfprobe('suprschool-ffprobe-that-does-not-exist')).toBe(false);
+  });
+
+  it('re-probes after an unavailable outcome so a boot-time miss is not permanent', () => {
+    // Regression: resolution happened once at boot and was pinned for the life
+    // of the process, so a single unavailable outcome — a host that had not run
+    // `npm install` yet, or a probe that timed out while the machine was loaded
+    // — failed every recording save until someone restarted the API.
+    let launchable = false;
+    const canLaunch = vi.fn((path: string) => launchable && path === '/packaged/ffprobe');
+    const resolver = createFfprobeBinaryResolver('ffprobe', {
+      bundledPath: () => '/packaged/ffprobe',
+      canLaunch,
+    });
+
+    expect(resolver.resolve()).toEqual({ path: 'ffprobe', source: 'unavailable' });
+
+    launchable = true;
+
+    expect(resolver.resolve()).toEqual({ path: '/packaged/ffprobe', source: 'bundled' });
+  });
+
+  it('keeps a launchable resolution instead of spawning a probe per inspection', () => {
+    const canLaunch = vi.fn(() => true);
+    const resolver = createFfprobeBinaryResolver('/usr/local/bin/ffprobe', {
+      bundledPath: () => undefined,
+      canLaunch,
+    });
+
+    const first = resolver.resolve();
+    expect(resolver.resolve()).toEqual(first);
+    expect(resolver.resolve()).toEqual({ path: '/usr/local/bin/ffprobe', source: 'configured' });
+    expect(canLaunch).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces the launch failure as the cause when the resolved binary is missing', async () => {

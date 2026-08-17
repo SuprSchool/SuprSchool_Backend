@@ -101,7 +101,10 @@ export const updateExamGroupSchema = createExamGroupSchema;
 export const createAssessmentSchema = z.object({
   endsAt: time,
   maxMarks: z.coerce.number().finite().positive(),
-  rubrics: z.array(rubricSchema).min(1).max(100),
+  // Optional, like the assignment section breakdown: an exam is publishable on
+  // its maximum alone. The total-must-match rule below binds only once a
+  // breakdown exists, because there is nothing to total otherwise.
+  rubrics: z.array(rubricSchema).max(100).optional(),
   scheduledOn: date,
   startsAt: time,
   subjectId: z.uuid(),
@@ -115,7 +118,9 @@ export const createAssessmentSchema = z.object({
       path: ['endsAt'],
     });
   }
-  const rubricTotal = input.rubrics.reduce((total, rubric) => total + rubric.marks, 0);
+  const rubrics = input.rubrics ?? [];
+  if (rubrics.length === 0) return;
+  const rubricTotal = rubrics.reduce((total, rubric) => total + rubric.marks, 0);
   if (Math.abs(rubricTotal - input.maxMarks) > Number.EPSILON * 100) {
     context.addIssue({
       code: 'custom',
