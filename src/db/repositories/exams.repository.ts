@@ -143,10 +143,20 @@ type ResultRow = {
   feedback: string | null;
   id: string;
   marks: number;
-  publishedAt: Date | null;
+  publishedAt: Date | string | null;
   studentId: string;
-  updatedAt: Date;
+  updatedAt: Date | string;
 };
+
+/**
+ * Timestamps arrive as `Date` from the Drizzle query builder but as raw
+ * strings from `db.execute(sql...)` — the driver's parsers are not applied on
+ * that path. Every mapper below may receive either, so normalise here rather
+ * than assuming one shape (assuming `Date` is what 500'd the grading save).
+ */
+function toIsoTimestamp(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
 
 function toGroup(row: GroupRow): ExamGroup {
   return {
@@ -234,9 +244,9 @@ function toResult(row: ResultRow): ExamResult {
     ...(row.feedback === null ? {} : { feedback: row.feedback }),
     id: row.id,
     marks: row.marks,
-    ...(row.publishedAt === null ? {} : { publishedAt: row.publishedAt.toISOString() }),
+    ...(row.publishedAt === null ? {} : { publishedAt: toIsoTimestamp(row.publishedAt) }),
     studentId: row.studentId,
-    updatedAt: row.updatedAt.toISOString(),
+    updatedAt: toIsoTimestamp(row.updatedAt),
   };
 }
 
@@ -708,6 +718,17 @@ export class DrizzleExamsRepository implements ExamsRepository {
         on member.school_id = ${identity.schoolId}::uuid
         and member.class_id = allowed.class_id
         and member.is_active
+        -- A class_members row is not proof of being a student: the class
+        -- teacher holds an active membership too, and without this predicate
+        -- they appeared as a gradeable roster row. Same guard as the exams
+        -- leaderboard below.
+        and exists (
+          select 1 from public.user_roles student_role
+          where student_role.user_id = member.student_id
+            and student_role.school_id = ${identity.schoolId}::uuid
+            and student_role.role = 'student'
+            and student_role.is_active
+        )
       left join public.user_profiles profile on profile.id = member.student_id
       left join public.exam_submissions submission
         on submission.school_id = ${identity.schoolId}::uuid
@@ -722,14 +743,14 @@ export class DrizzleExamsRepository implements ExamsRepository {
       assessmentId: string;
       feedback: string | null;
       marks: number | null;
-      publishedAt: Date | null;
+      publishedAt: Date | string | null;
       resultId: string | null;
-      resultUpdatedAt: Date | null;
+      resultUpdatedAt: Date | string | null;
       rollNumber: string | null;
       studentId: string | null;
       studentName: string | null;
       submissionId: string | null;
-      submittedAt: Date | null;
+      submittedAt: Date | string | null;
     }>;
     if (rows.length === 0) return undefined;
     const items = rows.flatMap((row): ReadonlyArray<ExamSubmissionRosterEntry> => {
@@ -739,7 +760,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
         : {
             id: row.submissionId,
             studentId: row.studentId,
-            submittedAt: row.submittedAt.toISOString(),
+            submittedAt: toIsoTimestamp(row.submittedAt),
           };
       const result = row.resultId === null || row.marks === null || row.resultUpdatedAt === null
         ? undefined
@@ -747,9 +768,9 @@ export class DrizzleExamsRepository implements ExamsRepository {
             ...(row.feedback === null ? {} : { feedback: row.feedback }),
             id: row.resultId,
             marks: Number(row.marks),
-            ...(row.publishedAt === null ? {} : { publishedAt: row.publishedAt.toISOString() }),
+            ...(row.publishedAt === null ? {} : { publishedAt: toIsoTimestamp(row.publishedAt) }),
             studentId: row.studentId,
-            updatedAt: row.resultUpdatedAt.toISOString(),
+            updatedAt: toIsoTimestamp(row.resultUpdatedAt),
           };
       return [{
         ...(result === undefined ? {} : { result }),
@@ -825,7 +846,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
     return submission === undefined ? undefined : {
       id: submission.id,
       studentId: submission.studentId,
-      submittedAt: submission.submittedAt.toISOString(),
+      submittedAt: toIsoTimestamp(submission.submittedAt),
     };
   }
 
@@ -978,6 +999,9 @@ export class DrizzleExamsRepository implements ExamsRepository {
     input: UpsertExamResultInput,
     updatedAt: Date,
   ): Promise<ExamResult | undefined> {
+    // The driver rejects Date instances in these templates ("argument must be
+    // of type string...") — timestamps travel as ISO text, as everywhere else.
+    const updatedAtIso = updatedAt.toISOString();
     const rows = await this.db.execute(sql`
       with allowed as (
         select ce.id as assessment_id
@@ -1014,7 +1038,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
           allowed.assessment_id,
           ${studentId}::uuid,
           ${identity.userId}::uuid,
-          ${updatedAt}
+          ${updatedAtIso}::timestamptz
         from allowed
         on conflict (assessment_id, student_id) do nothing
         returning id
@@ -1029,7 +1053,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
           ${identity.userId}::uuid,
           ${input.marks},
           ${input.feedback ?? null},
-          ${updatedAt}
+          ${updatedAtIso}::timestamptz
         from allowed
         on conflict (assessment_id, student_id) do update
           set entered_by_teacher_id = excluded.entered_by_teacher_id,
@@ -1078,7 +1102,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
   }
 
   public async listPublishedAwardRecipients(identity: ExamIdentity, assessmentId: string): Promise<ReadonlyArray<{ id: string; publishedAt: Date; studentId: string }>> {
-    return this.db.execute(sql`
+    const rows = await this.db.execute(sql`
       select result.id, result.published_at as "publishedAt", result.student_id as "studentId"
       from public.exam_results result
       join public.class_exams assessment on assessment.id = result.assessment_id and assessment.school_id = result.school_id
@@ -1096,7 +1120,14 @@ export class DrizzleExamsRepository implements ExamsRepository {
             and subject.teacher_id = ${identity.userId}::uuid
         )
       order by result.id
-    `) as unknown as ReadonlyArray<{ id: string; publishedAt: Date; studentId: string }>
+    `) as unknown as ReadonlyArray<{ id: string; publishedAt: Date | string; studentId: string }>;
+    // Raw-execute timestamps may arrive as strings; award bookkeeping does
+    // date arithmetic on `occurredAt`, so hand it a real Date.
+    return rows.map((row) => ({
+      id: row.id,
+      publishedAt: row.publishedAt instanceof Date ? row.publishedAt : new Date(row.publishedAt),
+      studentId: row.studentId,
+    }));
   }
 
   public async publishAssessment(
@@ -1455,7 +1486,7 @@ export class DrizzleExamsRepository implements ExamsRepository {
       classId: row.classId,
       // The student sees the result on publication, so that is the date the
       // "Result Evaluated On" card (261:17719) prints.
-      evaluatedDate: result?.publishedAt?.toISOString() ?? null,
+      evaluatedDate: result?.publishedAt == null ? null : toIsoTimestamp(result.publishedAt),
       feedback: result?.feedback ?? null,
       gradingRubric: toGradingRubric(rubrics, evaluation?.rubricSecuredMarks ?? null),
       groupId: row.examGroupId,

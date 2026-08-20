@@ -216,6 +216,39 @@ describe('profile router', () => {
     expect(profileService.setPresetAvatar).not.toHaveBeenCalled();
   });
 
+  it('accepts every interest the profile editor draws', async () => {
+    // The editor (`253:14512` / `648:10200`) publishes twelve pills, not
+    // signup's eight. The bottom two rows used to 400 here, so a student could
+    // not save Travel, Cooking, Writing or Science from their own profile.
+    const profileService = createProfileService();
+    vi.mocked(profileService.replaceInterests).mockResolvedValue(undefined);
+    const editorInterests = [
+      'Reading', 'Sports', 'Music', 'Gaming', 'Art', 'Coding',
+      'Photography', 'Dance', 'Travel', 'Cooking', 'Writing', 'Science',
+    ];
+
+    await request(createTestApp(profileService))
+      .put('/v1/profile/interests')
+      .send({ interests: editorInterests })
+      .expect(204);
+
+    expect(profileService.replaceInterests).toHaveBeenCalledWith('user-1', editorInterests);
+  });
+
+  it('keeps Dance the only spelling of the dancing interest', async () => {
+    // The editor labels the pill "Dancing"; the stored value stays `Dance`, so
+    // one interest never acquires two storable spellings. The client maps the
+    // label to the value in `student-profile-hobbies.ts`.
+    const profileService = createProfileService();
+
+    await request(createTestApp(profileService))
+      .put('/v1/profile/interests')
+      .send({ interests: ['Dancing'] })
+      .expect(400);
+
+    expect(profileService.replaceInterests).not.toHaveBeenCalled();
+  });
+
   it('rejects duplicate interests before changing the authenticated profile', async () => {
     const profileService = createProfileService();
 

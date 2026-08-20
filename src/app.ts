@@ -28,6 +28,7 @@ import { createChatRouter } from "./routes/chat.routes.js";
 import {
   createSchoolRouter,
   createStudentCommunityProfileRouter,
+  createStudentDirectoryRouter,
   createTeacherCommunityProfileRouter,
 } from "./routes/community-profile.routes.js";
 import {
@@ -242,6 +243,13 @@ export function createApp(dependencies: AppDependencies = {}): Express {
     app.use(
       "/v1/teacher/profile",
       createTeacherCommunityProfileRouter(
+        dependencies.communityProfileService,
+        authenticate,
+      ),
+    );
+    app.use(
+      "/v1/students",
+      createStudentDirectoryRouter(
         dependencies.communityProfileService,
         authenticate,
       ),

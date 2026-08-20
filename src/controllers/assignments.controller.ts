@@ -53,6 +53,7 @@ export interface AssignmentsController {
   listForStudent(request: Request, response: Response): Promise<void>;
   listForTeacher(request: Request, response: Response): Promise<void>;
   listSubmissions(request: Request, response: Response): Promise<void>;
+  setStudentCompletion(request: Request, response: Response): Promise<void>;
   setSubmissionCompletion(request: Request, response: Response): Promise<void>;
   remindAll(request: Request, response: Response): Promise<void>;
   remindStudent(request: Request, response: Response): Promise<void>;
@@ -169,6 +170,19 @@ export function createAssignmentsController(service: AssignmentsService): Assign
       const submissionId = submissionIdParamSchema.parse(request.params).submissionId;
       const { action } = submissionCompletionSchema.parse(request.body);
       response.status(200).json(await service.setCompletion(identityValue, submissionId, action));
+    },
+
+    // 668:4935 / 668:4886 reached from a roster row the student never submitted
+    // against, so there is no submission id to PATCH — the student is the key
+    // and the row is created on demand.
+    async setStudentCompletion(request, response) {
+      const identityValue = identity(request, 'teacher');
+      const { assignmentId } = assignmentIdParamSchema.parse(request.params);
+      const { studentId } = studentIdParamSchema.parse(request.params);
+      const { action } = submissionCompletionSchema.parse(request.body);
+      response.status(200).json(
+        await service.setStudentCompletion(identityValue, assignmentId, studentId, action),
+      );
     },
 
     async remindStudent(request, response) {

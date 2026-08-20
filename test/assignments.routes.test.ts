@@ -64,6 +64,7 @@ function createService(): AssignmentsService {
     remindAll: vi.fn(),
     remindStudent: vi.fn(),
     setCompletion: vi.fn(),
+    setStudentCompletion: vi.fn(),
     update: vi.fn(),
   };
 }
@@ -704,7 +705,11 @@ describe('assignment review regressions', () => {
     expect(queries.some((query) => query.includes('insert into') && query.includes('class_subjects'))).toBe(true);
   });
 
-  it('requires a current class-subject inside the teacher submission-list query', async () => {
+  // The submission list is now roster-driven, so the class_subjects guard moved
+  // out of the listing query and into the ownership probe that gates it — the
+  // roster query itself selects from class_members. The invariant is unchanged
+  // and is asserted where it now lives, in both halves.
+  it('gates the teacher submission-list on a current class-subject before reading the roster', async () => {
     const queries: string[] = [];
     let queryCount = 0;
     const callback: RemoteCallback = async (query) => {
@@ -722,7 +727,64 @@ describe('assignment review regressions', () => {
       { limit: 20 },
     );
 
-    expect(queries.some((query) => query.includes('assignment_submissions') && query.includes('class_subjects'))).toBe(true);
+    expect(queries).toHaveLength(2);
+    const [authorization, roster] = queries as [string, string];
+    expect(authorization).toContain('class_subjects');
+    expect(authorization).toContain('"teacher_id"');
+    expect(authorization).toContain('"deleted_at" is null');
+    expect(roster).toContain('class_members');
+    expect(roster).toContain('assignment_submissions');
+    expect(roster).toContain('"school_id"');
+  });
+
+  it('never reads the roster when the ownership probe finds no managed assignment', async () => {
+    const queries: string[] = [];
+    const callback: RemoteCallback = async (query) => {
+      queries.push(query);
+      return { rows: [] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      databaseWithTransaction(callback),
+    );
+
+    const page = await repository.listSubmissions(
+      { schoolId, userId: teacherId },
+      'a1',
+      { limit: 20 },
+    );
+
+    expect(page).toBeUndefined();
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).not.toContain('class_members');
+  });
+
+  // 667:3274 draws "Remind All Non-Submitted (3)" and 543:13354 a "Not Graded"
+  // group; both need students who have NO submission row, which only a LEFT JOIN
+  // out of the roster can produce.
+  it('left-joins submissions onto the roster so non-submitters are listed', async () => {
+    const queries: string[] = [];
+    let queryCount = 0;
+    const callback: RemoteCallback = async (query) => {
+      queries.push(query);
+      queryCount += 1;
+      return { rows: queryCount === 1 ? [{ id: 'a1' }] : [] };
+    };
+    const repository = new DrizzleAssignmentsRepository(
+      databaseWithTransaction(callback),
+    );
+
+    await repository.listSubmissions(
+      { schoolId, userId: teacherId },
+      'a1',
+      { limit: 20 },
+    );
+
+    const roster = queries[1] ?? '';
+    expect(roster).toContain('from "class_members"');
+    expect(roster).toContain('left join "assignment_submissions"');
+    expect(roster).toContain('"is_active"');
+    // A roster row with no submission still needs a stable key.
+    expect(roster).toContain('coalesce');
   });
 
   it('requires a current teacher assignment inside the grade mutation predicate', async () => {

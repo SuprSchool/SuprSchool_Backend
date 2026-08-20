@@ -7,9 +7,11 @@ import {
 import type {
   AssessmentSummaryReader,
   CommunityIdentity,
+  CommunityProfileDescriptorReader,
   CurrentSchool,
   SchoolAssetUrlSigner,
   SchoolEventSummaryReader,
+  StudentDirectoryProfile,
   StudentProfileOverview,
   StudentProgressSummaryReader,
   TeacherProfileOverview,
@@ -23,12 +25,30 @@ export const SCHOOL_ASSET_URL_TTL_SECONDS = 300;
 export interface CommunityProfileService {
   getCurrentSchool(identity: CommunityIdentity): Promise<CurrentSchool>;
   getStudentOverview(identity: CommunityIdentity): Promise<StudentProfileOverview>;
+  /**
+   * Another student's profile, resolved inside the caller's school.
+   *
+   * Open to both roles: teachers reach it from participant and submission
+   * cards, students from event and class leaderboards, and the payload is the
+   * same either way — nothing in it is teacher-only, so gating it on role
+   * would break the student half of the same underlined name.
+   */
+  getStudentDirectoryProfile(
+    identity: CommunityIdentity,
+    studentId: string,
+  ): Promise<StudentDirectoryProfile>;
   getTeacherOverview(identity: CommunityIdentity): Promise<TeacherProfileOverview>;
 }
 
 export interface CommunityProfileServiceDependencies {
   assessmentSummaryReader: AssessmentSummaryReader;
   eventSummaryReader: SchoolEventSummaryReader;
+  /**
+   * Optional for the same reason every `AppDependencies` entry is: an app can
+   * be built with only some of the graph. Without it the directory read fails
+   * loudly rather than returning a profile with no name on it.
+   */
+  profileDescriptorReader?: CommunityProfileDescriptorReader;
   repository: CommunityProfileRepository;
   schoolAssetUrlSigner: SchoolAssetUrlSigner;
   studentProgressSummaryReader?: StudentProgressSummaryReader;
@@ -70,6 +90,60 @@ export function createCommunityProfileService(
         stats: {
           attendance: overview.attendance,
           avgScore: average === null ? '—' : formatPercentage(average),
+          classRank: progress.classRank === null ? '—' : `#${progress.classRank}`,
+          eventsParticipated: Math.max(0, eventsParticipated),
+          points: Math.max(0, progress.points),
+          streakDays: overview.streakDays,
+        },
+      };
+    },
+
+    async getStudentDirectoryProfile(identity, studentId): Promise<StudentDirectoryProfile> {
+      const descriptorReader = dependencies.profileDescriptorReader;
+      if (descriptorReader === undefined) {
+        throw new AppError('INTERNAL_ERROR', 500, 'Student profile reads are not configured');
+      }
+
+      /*
+        The subject is looked up as if they were the caller, but inside the
+        *caller's* school. That is the whole tenancy argument for this read:
+        `findStudentOverview` already filters on `classMembers.schoolId`, the
+        current academic year, an active membership and an active `student`
+        role, so pinning `schoolId` to `identity.schoolId` makes every one of
+        those filters school-scoped without a second query to re-check.
+      */
+      const subject: CommunityIdentity = {
+        role: 'student',
+        schoolId: identity.schoolId,
+        userId: studentId,
+      };
+      const overview = await dependencies.repository.findStudentOverview(subject, clock());
+      /*
+        404, not 403. A student in another school, a teacher's id, and an id
+        that was never issued must be indistinguishable from here — a 403
+        would confirm the row exists somewhere.
+      */
+      if (!overview) throw new AppError('NOT_FOUND', 404, 'Student not found');
+
+      const [descriptor, eventsParticipated, progress] = await Promise.all([
+        descriptorReader.getProfile(studentId, identity.schoolId),
+        dependencies.eventSummaryReader.countParticipated(identity.schoolId, studentId),
+        progressSummaryReader.getStudentProgress({
+          classId: overview.classId,
+          schoolId: identity.schoolId,
+          studentId,
+        }),
+      ]);
+
+      return {
+        avatar: descriptor.avatar,
+        classSection: overview.classSection,
+        id: overview.id,
+        interests: descriptor.interests,
+        name: descriptor.displayName,
+        rollNumber: overview.rollNumber,
+        schoolName: overview.schoolName,
+        stats: {
           classRank: progress.classRank === null ? '—' : `#${progress.classRank}`,
           eventsParticipated: Math.max(0, eventsParticipated),
           points: Math.max(0, progress.points),

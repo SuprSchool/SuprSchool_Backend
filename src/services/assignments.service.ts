@@ -164,6 +164,12 @@ export interface AssignmentsService {
     submissionId: string,
     action: SubmissionCompletionAction,
   ): Promise<SubmissionCompletion>;
+  setStudentCompletion(
+    identity: AssignmentIdentity,
+    assignmentId: string,
+    studentId: string,
+    action: SubmissionCompletionAction,
+  ): Promise<SubmissionCompletion>;
   remindAll(
     identity: AssignmentIdentity,
     assignmentId: string,
@@ -285,9 +291,14 @@ function toSubmission(stored: StoredSubmission): AssignmentSubmission {
   return {
     completedAt: stored.completedAt,
     ...(stored.feedback === undefined ? {} : { feedback: stored.feedback }),
+    ...(stored.fileName === undefined ? {} : { fileName: stored.fileName }),
     ...(stored.gradedAt === undefined ? {} : { gradedAt: stored.gradedAt }),
     id: stored.id,
+    ...(stored.isGradedAssignment === undefined
+      ? {}
+      : { isGradedAssignment: stored.isGradedAssignment }),
     ...(stored.marks === undefined ? {} : { marks: stored.marks }),
+    ...(stored.maxMarks === undefined ? {} : { maxMarks: stored.maxMarks }),
     studentId: stored.studentId,
     studentName: stored.studentName,
     ...(stored.submittedAt === undefined ? {} : { submittedAt: stored.submittedAt }),
@@ -578,7 +589,24 @@ export function createAssignmentsService({
     async listSubmissions(identity, assignmentId, query) {
       const page = await repository.listSubmissions(identity, assignmentId, query);
       if (page === undefined) throw notFound();
-      return { ...page, items: page.items.map(toSubmission) };
+      // The `Assignment.pdf` tile every submission frame draws is the student's
+      // upload, and `academic-files` is private — a path alone opens nothing, so
+      // each row that has one carries its own short-lived read URL. A failure to
+      // sign degrades that row to a nameless tile rather than failing the whole
+      // list: one unreadable object must not blank the roster.
+      const items = await Promise.all(page.items.map(async (stored) => {
+        const submission = toSubmission(stored);
+        if (stored.objectPath === undefined) return submission;
+        try {
+          return {
+            ...submission,
+            fileUrl: await files.createReadUrl('academic-files', stored.objectPath, 900),
+          };
+        } catch {
+          return submission;
+        }
+      }));
+      return { ...page, items };
     },
 
     async grade(identity, submissionId, input, idempotencyKey) {
@@ -625,6 +653,19 @@ export function createAssignmentsService({
     async setCompletion(identity, submissionId, action) {
       const completion = await repository.setSubmissionCompletion(
         identity, submissionId, action, clock(),
+      );
+      if (completion === undefined) throw notFound();
+      return completion;
+    },
+
+    // The same bookkeeping flag as `setCompletion`, addressed by student instead
+    // of by submission row, so a teacher can close out somebody who never
+    // uploaded anything — the row is created on demand. Same reasoning as above:
+    // no idempotency wrapper (both directions replay cleanly) and no outbox
+    // event (the student is not notified that a teacher ticked them off).
+    async setStudentCompletion(identity, assignmentId, studentId, action) {
+      const completion = await repository.setStudentCompletion(
+        identity, assignmentId, studentId, action, clock(),
       );
       if (completion === undefined) throw notFound();
       return completion;

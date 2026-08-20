@@ -65,6 +65,14 @@ export function createAssignmentsRouter(
     requireCapability('gradeSubmission'),
     controller.setSubmissionCompletion,
   );
+  // Completion addressed by student, for the roster rows that have no submission
+  // row to PATCH. PUT, not PATCH: the body states the whole desired state and
+  // the write is idempotent in both directions.
+  router.put(
+    '/teacher/assignments/:assignmentId/students/:studentId/completion',
+    requireCapability('gradeSubmission'),
+    controller.setStudentCompletion,
+  );
   router.post(
     '/teacher/assignments/:assignmentId/reminder/student/:studentId',
     requireCapability('createAssignment'),

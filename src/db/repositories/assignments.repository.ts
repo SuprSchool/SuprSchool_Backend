@@ -13,7 +13,7 @@ import {
 } from 'drizzle-orm';
 
 import type { Database } from '../client.js';
-import { classMembers, classSubjects, subjects, userProfiles } from '../schema/core.js';
+import { classMembers, classSubjects, subjects, userProfiles, userRoles } from '../schema/core.js';
 import {
   assignmentResources,
   assignmentRubrics,
@@ -178,6 +178,13 @@ export interface AssignmentsRepository {
     assignmentId: string,
     query: SubmissionListQuery,
   ): Promise<CursorPage<StoredSubmission> | undefined>;
+  setStudentCompletion(
+    identity: AssignmentIdentity,
+    assignmentId: string,
+    studentId: string,
+    action: SubmissionCompletionAction,
+    completedAt: Date,
+  ): Promise<SubmissionCompletion | undefined>;
   setSubmissionCompletion(
     identity: AssignmentIdentity,
     submissionId: string,
@@ -508,6 +515,15 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           where roster.school_id = ${identity.schoolId}::uuid
             and roster.class_id = "assignments"."class_id"
             and roster.is_active
+            -- A class_members row is not proof of being a student: the class
+            -- teacher holds an active membership too. Same guard as rankings.
+            and exists (
+              select 1 from public.user_roles student_role
+              where student_role.user_id = roster.student_id
+                and student_role.school_id = roster.school_id
+                and student_role.role = 'student'
+                and student_role.is_active
+            )
         )`,
       })
       .from(assignments)
@@ -962,52 +978,90 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     });
   }
 
+  /**
+   * The teacher's submissions read is driven by the CLASS ROSTER, not by the
+   * `assignment_submissions` table.
+   *
+   * A submission row is only born when the student opens an upload session
+   * (`upsertSubmissionDraft`), so a student who never touched the assignment has
+   * no row at all. Reading `from(assignment_submissions)` therefore returned
+   * *only* students who had already started uploading, and every frame that
+   * depends on the absentees came out empty: 667:3274's red
+   * "Remind All Non-Submitted (3)" button never drew (its count was always 0),
+   * 543:13354's "Not Graded" group never drew, 667:3533's "Not Submitted" group
+   * never drew, and there was no row to hang a per-student remind bell or a
+   * Mark-as-Complete sheet on. Reminders already walk `class_members`
+   * (`listReminderStudents`), so the two halves of the same screen disagreed
+   * about who was in the class.
+   *
+   * Roster rows that have no submission carry the STUDENT id in `id` — see the
+   * note on `AssignmentSubmission.id`. `maxMarks` and `isGradedAssignment` are
+   * denormalised from the assignment onto every row so the screen can size the
+   * marks field (408:10557 draws `0/35`) without a second fetch.
+   */
   public async listSubmissions(
     identity: AssignmentIdentity,
     assignmentId: string,
     query: SubmissionListQuery,
   ): Promise<CursorPage<StoredSubmission> | undefined> {
-    if (!await this.canManage(identity, assignmentId)) return undefined;
+    const assignment = await this.findManaged(identity, assignmentId);
+    if (assignment === undefined) return undefined;
     const cursor = query.cursor;
     const rows = await this.db
       .select({
-        assignmentId: assignmentSubmissions.assignmentId,
+        assignmentId: sql<string>`${assignmentId}::uuid`.as('assignment_id'),
         completedAt: assignmentSubmissions.completedAt,
         feedback: assignmentSubmissions.feedback,
+        fileName: assignmentSubmissions.displayName,
         gradedAt: assignmentSubmissions.gradedAt,
-        id: assignmentSubmissions.id,
+        id: sql<string>`coalesce(${assignmentSubmissions.id}, ${classMembers.studentId})`.as('row_id'),
         marks: assignmentSubmissions.marks,
         objectPath: assignmentSubmissions.objectPath,
-        schoolId: assignmentSubmissions.schoolId,
-        studentId: assignmentSubmissions.studentId,
+        studentId: classMembers.studentId,
         studentName: userProfiles.displayName,
         submittedAt: assignmentSubmissions.submittedAt,
       })
-      .from(assignmentSubmissions)
-      .innerJoin(assignments, and(
-        eq(assignments.id, assignmentSubmissions.assignmentId),
-        eq(assignments.schoolId, assignmentSubmissions.schoolId),
-      ))
+      .from(classMembers)
       // The name the roster row, the search box and the footer print. Joined on
       // the tenant as well as the student key, so a profile from another school
-      // can never name a submission in this one.
+      // can never name a student in this one.
       .innerJoin(userProfiles, and(
-        eq(userProfiles.id, assignmentSubmissions.studentId),
-        eq(userProfiles.schoolId, assignmentSubmissions.schoolId),
+        eq(userProfiles.id, classMembers.studentId),
+        eq(userProfiles.schoolId, classMembers.schoolId),
+      ))
+      // A class_members row is not proof of being a student — the class teacher
+      // holds an active membership of the class they teach, and without this
+      // join they appeared as a submission row. Same guard as the rankings and
+      // exam leaderboard rosters.
+      .innerJoin(userRoles, and(
+        eq(userRoles.userId, classMembers.studentId),
+        eq(userRoles.schoolId, classMembers.schoolId),
+        eq(userRoles.role, 'student'),
+        eq(userRoles.isActive, true),
+      ))
+      .leftJoin(assignmentSubmissions, and(
+        eq(assignmentSubmissions.assignmentId, assignmentId),
+        eq(assignmentSubmissions.schoolId, classMembers.schoolId),
+        eq(assignmentSubmissions.studentId, classMembers.studentId),
       ))
       .where(and(
-        eq(assignmentSubmissions.schoolId, identity.schoolId),
-        eq(assignmentSubmissions.assignmentId, assignmentId),
-        eq(assignments.schoolId, identity.schoolId),
-        eq(assignments.teacherId, identity.userId),
-        isNull(assignments.deletedAt),
-        this.teacherAssignment(identity, assignments.classId, assignments.subjectId),
+        eq(classMembers.schoolId, identity.schoolId),
+        eq(classMembers.classId, assignment.classId),
+        eq(classMembers.isActive, true),
         cursor === undefined ? undefined : this.submissionCursorCondition(cursor),
       ))
-      .orderBy(sql`${assignmentSubmissions.submittedAt} desc nulls last`, desc(assignmentSubmissions.id))
+      .orderBy(
+        sql`${assignmentSubmissions.submittedAt} desc nulls last`,
+        desc(sql`coalesce(${assignmentSubmissions.id}, ${classMembers.studentId})`),
+      )
       .limit(query.limit + 1);
     const pageRows = rows.slice(0, query.limit);
-    const items = pageRows.map(toStoredSubmission);
+    const items = pageRows.map((row) => ({
+      ...toStoredSubmission(row),
+      ...(row.fileName === null ? {} : { fileName: row.fileName }),
+      isGradedAssignment: assignment.isGraded,
+      ...(assignment.maxMarks === null ? {} : { maxMarks: assignment.maxMarks }),
+    }));
     const last = pageRows.at(-1);
     return {
       items,
@@ -1126,6 +1180,78 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     };
   }
 
+  /**
+   * Completion addressed by STUDENT rather than by submission row.
+   *
+   * `setSubmissionCompletion` can only ever update a row that already exists,
+   * and a submission row is not created until the student opens an upload
+   * session — so the teacher could not close out anybody who never handed
+   * anything in, which is exactly the case the screen is for. This upserts
+   * instead: the roster row is the authority, the submission row is created
+   * empty if it is missing, and only `completed_at` is written. The file and
+   * grade shape checks both permit an all-null row, so the insert is legal
+   * without inventing a fake upload or a fake mark.
+   *
+   * Guarded exactly like `setSubmissionCompletion` — same school, same owning
+   * teacher, live assignment, live `class_subjects` assignment — plus the
+   * student must be an ACTIVE member of the assignment's class, so a teacher
+   * cannot complete somebody who is not in the room. Both directions stay
+   * idempotent: `complete` coalesces onto any existing instant, `incomplete`
+   * nulls it.
+   */
+  public async setStudentCompletion(
+    identity: AssignmentIdentity,
+    assignmentId: string,
+    studentId: string,
+    action: SubmissionCompletionAction,
+    completedAt: Date,
+  ): Promise<SubmissionCompletion | undefined> {
+    const completedAtIso = completedAt.toISOString();
+    const inserted = action === 'complete' ? sql`${completedAtIso}::timestamptz` : sql`null`;
+    const onConflict = action === 'complete'
+      ? sql`coalesce(public.assignment_submissions.completed_at, excluded.completed_at)`
+      : sql`null`;
+    const rows = await this.db.execute(sql<{ completedAt: Date | null; id: string }>`
+      insert into public.assignment_submissions
+        (school_id, assignment_id, student_id, completed_at, updated_at)
+      select
+        assignment.school_id,
+        assignment.id,
+        member.student_id,
+        ${inserted},
+        ${completedAtIso}::timestamptz
+      from public.assignments assignment
+      join public.class_members member
+        on member.school_id = assignment.school_id
+        and member.class_id = assignment.class_id
+        and member.student_id = ${studentId}::uuid
+        and member.is_active
+      join public.user_roles student_role
+        on student_role.user_id = member.student_id
+        and student_role.school_id = member.school_id
+        and student_role.role = 'student'
+        and student_role.is_active
+      join public.class_subjects subject
+        on subject.school_id = assignment.school_id
+        and subject.class_id = assignment.class_id
+        and subject.subject_id = assignment.subject_id
+        and subject.teacher_id = ${identity.userId}::uuid
+      where assignment.id = ${assignmentId}::uuid
+        and assignment.school_id = ${identity.schoolId}::uuid
+        and assignment.teacher_id = ${identity.userId}::uuid
+        and assignment.deleted_at is null
+      on conflict (assignment_id, student_id) do update
+        set completed_at = ${onConflict},
+            updated_at = excluded.updated_at
+      returning id, completed_at as "completedAt"
+    `) as unknown as ReadonlyArray<{ completedAt: Date | string | null; id: string }>;
+    const updated = rows[0];
+    return updated === undefined ? undefined : {
+      completedAt: submissionTimestampIso(updated.completedAt),
+      id: updated.id,
+    };
+  }
+
   private completionAuthorization(identity: AssignmentIdentity) {
     return exists(this.db
       .select({ id: assignments.id })
@@ -1153,6 +1279,14 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     const students = await this.db
       .select({ studentId: classMembers.studentId })
       .from(classMembers)
+      // Reminders and outbox fan-out must never address the class teacher's
+      // own membership row — same student-role guard as the roster read.
+      .innerJoin(userRoles, and(
+        eq(userRoles.userId, classMembers.studentId),
+        eq(userRoles.schoolId, classMembers.schoolId),
+        eq(userRoles.role, 'student'),
+        eq(userRoles.isActive, true),
+      ))
       .where(and(
         eq(classMembers.schoolId, identity.schoolId),
         eq(classMembers.classId, assignment.classId),
@@ -1537,18 +1671,23 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     };
   }
 
+  // Keyed on the row id the roster read EMITS — `coalesce(submission.id,
+  // member.student_id)` — because a roster row for a student with no submission
+  // has no `assignment_submissions.id` to page on, and comparing a null there
+  // silently drops every absentee from page two onward.
   private submissionCursorCondition(cursor: SubmissionCursor) {
+    const rowId = sql`coalesce(${assignmentSubmissions.id}, ${classMembers.studentId})`;
     if (cursor.submittedAt === null) {
       return and(
         isNull(assignmentSubmissions.submittedAt),
-        lt(assignmentSubmissions.id, cursor.id),
+        lt(rowId, cursor.id),
       );
     }
     return or(
       lt(assignmentSubmissions.submittedAt, new Date(cursor.submittedAt)),
       and(
         eq(assignmentSubmissions.submittedAt, new Date(cursor.submittedAt)),
-        lt(assignmentSubmissions.id, cursor.id),
+        lt(rowId, cursor.id),
       ),
       isNull(assignmentSubmissions.submittedAt),
     );

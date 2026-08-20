@@ -48,6 +48,7 @@ function createService(): AssignmentsService {
     remindAll: vi.fn(),
     remindStudent: vi.fn(),
     setCompletion: vi.fn(),
+    setStudentCompletion: vi.fn(),
     update: vi.fn(),
   };
 }
@@ -198,6 +199,108 @@ describe('assignment submission completion', () => {
     expect(queries[0]).not.toContain('graded_at');
     expect(queries[0]).not.toContain('marks');
     expect(queries[0]).not.toContain('grading_type');
+  });
+
+  // The teacher must be able to close out a student who never submitted, and
+  // such a student has no `assignment_submissions` row to address — so the route
+  // is keyed on the student and the row is created on demand.
+  describe('completion addressed by student', () => {
+    const assignmentRouteId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const path = `/teacher/assignments/${assignmentRouteId}/students/${studentId}/completion`;
+
+    it('marks a student complete without requiring a submission', async () => {
+      const service = createService();
+      vi.mocked(service.setStudentCompletion)
+        .mockResolvedValue({ id: submissionRouteId, completedAt });
+      const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+      const res = await request(teacherApp).put(path).send({ action: 'complete' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ id: submissionRouteId, completedAt });
+      expect(service.setStudentCompletion)
+        .toHaveBeenCalledWith(identity, assignmentRouteId, studentId, 'complete');
+    });
+
+    it('reopens a student and returns a null timestamp rather than omitting it', async () => {
+      const service = createService();
+      vi.mocked(service.setStudentCompletion)
+        .mockResolvedValue({ id: submissionRouteId, completedAt: null });
+      const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+      const res = await request(teacherApp).put(path).send({ action: 'incomplete' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ id: submissionRouteId, completedAt: null });
+    });
+
+    it('rejects a bad action, a malformed student id and an unknown body key', async () => {
+      const service = createService();
+      const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+      await request(teacherApp).put(path).send({ action: 'archive' }).expect(400);
+      await request(teacherApp)
+        .put(`/teacher/assignments/${assignmentRouteId}/students/not-a-uuid/completion`)
+        .send({ action: 'complete' }).expect(400);
+      await request(teacherApp).put(path).send({ action: 'complete', completedAt }).expect(400);
+
+      expect(service.setStudentCompletion).not.toHaveBeenCalled();
+    });
+
+    it('refuses a student token', async () => {
+      const service = createService();
+      const studentApp = createTestApp(service, { role: 'student', userId: studentId });
+
+      await request(studentApp).put(path).send({ action: 'complete' }).expect(403);
+
+      expect(service.setStudentCompletion).not.toHaveBeenCalled();
+    });
+
+    it('upserts the row, scoped to the school, the owning teacher and an active roster seat', async () => {
+      const { queries, repository } = createQueryRecordingRepository();
+
+      await repository.setStudentCompletion(
+        identity, assignmentRouteId, studentId, 'complete', new Date(completedAt),
+      );
+
+      expect(queries).toHaveLength(1);
+      const [query] = queries as [string];
+      expect(query).toContain('insert into public.assignment_submissions');
+      expect(query).toContain('on conflict (assignment_id, student_id) do update');
+      expect(query).toContain('class_members');
+      expect(query).toContain('member.is_active');
+      expect(query).toContain('class_subjects');
+      expect(query).toContain('assignment.deleted_at is null');
+    });
+
+    it('never writes a mark or a fake upload while completing', async () => {
+      const { queries, repository } = createQueryRecordingRepository();
+
+      await repository.setStudentCompletion(
+        identity, assignmentRouteId, studentId, 'complete', new Date(completedAt),
+      );
+
+      const [query] = queries as [string];
+      expect(query).not.toContain('marks');
+      expect(query).not.toContain('graded_at');
+      expect(query).not.toContain('object_path');
+      expect(query).not.toContain('submitted_at');
+    });
+
+    it('keeps the first instant on replay and clears it on incomplete', async () => {
+      const complete = createQueryRecordingRepository();
+      await complete.repository.setStudentCompletion(
+        identity, assignmentRouteId, studentId, 'complete', new Date(completedAt),
+      );
+      const incomplete = createQueryRecordingRepository();
+      await incomplete.repository.setStudentCompletion(
+        identity, assignmentRouteId, studentId, 'incomplete', new Date(completedAt),
+      );
+
+      expect(complete.queries[0]).toContain('coalesce');
+      expect(incomplete.queries[0]).not.toContain('coalesce');
+      expect(incomplete.queries[0]).toContain('completed_at');
+    });
   });
 
   it('migrates the completion column without disturbing the submission grant surface', () => {

@@ -5,13 +5,18 @@ import type { CommunityProfileService } from '../services/community-profile.serv
 import type {
   CommunityIdentity,
   CurrentSchool,
+  StudentDirectoryProfile,
   StudentProfileOverview,
   TeacherProfileOverview,
 } from '../types/community-profile.js';
-import { communityProfileRequestSchema } from '../validators/community-profile.schemas.js';
+import {
+  communityProfileRequestSchema,
+  studentDirectoryProfileRequestSchema,
+} from '../validators/community-profile.schemas.js';
 
 export interface CommunityProfileController {
   getCurrentSchool(request: Request, response: Response): Promise<void>;
+  getStudentDirectoryProfile(request: Request, response: Response): Promise<void>;
   getStudentOverview(request: Request, response: Response): Promise<void>;
   getTeacherOverview(request: Request, response: Response): Promise<void>;
 }
@@ -31,6 +36,18 @@ export function createCommunityProfileController(
       assertNoCallerInput(request);
       const body: TeacherProfileOverview = await service.getTeacherOverview(
         requireIdentity(request, 'teacher'),
+      );
+      response.status(200).json(body);
+    },
+    async getStudentDirectoryProfile(request: Request, response: Response): Promise<void> {
+      const { studentId } = studentDirectoryProfileRequestSchema.parse({
+        ...request.params,
+        ...request.query,
+      });
+      // No expected role: both roles reach this screen from an underlined name.
+      const body: StudentDirectoryProfile = await service.getStudentDirectoryProfile(
+        requireIdentity(request),
+        studentId,
       );
       response.status(200).json(body);
     },

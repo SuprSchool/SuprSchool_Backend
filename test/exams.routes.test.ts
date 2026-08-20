@@ -1470,3 +1470,184 @@ describe('subject exam detail sections', () => {
     expect(source).toContain('comment on column public.exam_results.rubric_secured_marks');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Teacher-entered marks. An exam is marked by the teacher on paper: there is no
+// student upload step, so every roster student must be gradeable from the
+// moment the exam exists, and each one starts at 0.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('teacher-entered exam marks', () => {
+  it('records marks for a student who never submitted through the app', async () => {
+    const { queries, repository } = createQueryRecordingRepository();
+
+    await repository.upsertResult(
+      examIdentity, 'assessment-1', studentId, { marks: 0 },
+      new Date('2026-07-13T00:00:00.000Z'),
+    );
+
+    const write = queries[0] ?? '';
+    // Nothing in the gate reads exam_submissions: a missing submission row can
+    // never block marks entry.
+    const gate = write.slice(0, write.indexOf('), submission as ('));
+    expect(gate).not.toContain('exam_submissions');
+    // The roster membership is what authorises the write, not a submission.
+    expect(gate).toContain('class_members');
+    // The submission row is written as a consequence of grading, not required
+    // as a precondition for it.
+    expect(write).toContain('insert into public.exam_submissions');
+    expect(write).toContain('on conflict (assessment_id, student_id) do nothing');
+  });
+
+  it('lists every active roster student, submitted or not', async () => {
+    const { queries, repository } = createQueryRecordingRepository();
+
+    await repository.listSubmissionRoster(examIdentity, 'assessment-1');
+
+    const roster = queries[0] ?? '';
+    // A left join is what puts an unsubmitted, ungraded student on the list at
+    // all; an inner join would silently hide exactly the students the teacher
+    // still has to enter marks for.
+    expect(roster).toContain('left join public.class_members member');
+    expect(roster).toContain('left join public.exam_submissions submission');
+    expect(roster).toContain('left join public.exam_results result');
+    expect(roster).toContain('member.is_active');
+    expect(roster).toContain('assessment.school_id = ');
+  });
+
+  it('rejects marks above the assessment maximum', async () => {
+    const repository = {
+      findAssessmentForResultEntry: vi.fn().mockResolvedValue({
+        classId: 'class-1', groupId: 'group-1', maxMarks: 35,
+      }),
+      upsertResult: vi.fn(),
+      withTransaction: vi.fn(),
+    } as unknown as ExamsRepository;
+    const service = createExamsService({
+      files: {} as never,
+      mutations: passthroughMutations(),
+      outbox: { write: vi.fn(), writeInTransaction: vi.fn() },
+      repository,
+    });
+
+    await expect(
+      service.upsertResult(examIdentity, 'assessment-1', studentId, { marks: 36 }, 'key-1'),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(repository.upsertResult).not.toHaveBeenCalled();
+  });
+
+  it('accepts a zero-mark entry, which is where every student starts', async () => {
+    const saved = {
+      id: 'result-1', marks: 0, studentId, updatedAt: '2026-07-13T00:00:00.000Z',
+    };
+    const repository = {
+      findAssessmentForResultEntry: vi.fn().mockResolvedValue({
+        classId: 'class-1', groupId: 'group-1', maxMarks: 35,
+      }),
+      upsertResult: vi.fn().mockResolvedValue(saved),
+      withTransaction: vi.fn(),
+    } as unknown as ExamsRepository;
+    const service = createExamsService({
+      files: {} as never,
+      mutations: passthroughMutations(),
+      outbox: { write: vi.fn(), writeInTransaction: vi.fn() },
+      repository,
+    });
+
+    await expect(
+      service.upsertResult(examIdentity, 'assessment-1', studentId, { marks: 0 }, 'key-1'),
+    ).resolves.toEqual(saved);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A teacher creates exams only for their own teaching assignment.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('teacher-owned exam creation', () => {
+  it('scopes group creation to a class the teacher actually teaches', async () => {
+    const { queries, repository } = createQueryRecordingRepository();
+
+    await repository.createGroup(examIdentity, 'class-1', groupInput);
+
+    const write = queries[0] ?? '';
+    expect(write).toContain('from public.class_subjects cs');
+    expect(write).toContain('cs.teacher_id = ');
+    expect(write).toContain('cs.class_id = ');
+    expect(write).toContain('cs.school_id = ');
+  });
+
+  it('scopes assessment creation to the teacher own class AND subject', async () => {
+    const { queries, repository } = createQueryRecordingRepository();
+
+    await repository.createAssessment(examIdentity, 'group-1', assessmentInput);
+
+    const write = queries[0] ?? '';
+    // Class alone is not enough: a teacher who takes 9B for English must not be
+    // able to file a 9B Mathematics exam.
+    expect(write).toContain('cs.class_id = eg.class_id');
+    expect(write).toContain('cs.subject_id = ');
+    expect(write).toContain('cs.teacher_id = ');
+    expect(write).toContain('cs.school_id = ');
+  });
+
+  it('turns an unassigned class or subject into a 403, not a silent no-op', async () => {
+    // The scoped insert matches no row, so the repository returns undefined.
+    const repository = {
+      createAssessment: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ExamsRepository;
+    const service = createExamsService({
+      files: {} as never,
+      mutations: passthroughMutations(),
+      outbox: { write: vi.fn(), writeInTransaction: vi.fn() },
+      repository,
+    });
+
+    await expect(
+      service.createAssessment(examIdentity, 'group-1', assessmentInput, 'key-1'),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('refuses exam creation to a student token', async () => {
+    const service = createService();
+    const studentApp = createTestApp(service, { role: 'student', userId: studentId });
+
+    await request(studentApp)
+      .post('/teacher/exam-groups/' + groupRouteId + '/assessments')
+      .set('Idempotency-Key', 'key-1')
+      .send(assessmentInput)
+      .expect(403);
+
+    expect(service.createAssessment).not.toHaveBeenCalled();
+  });
+
+  // Bulk creation is an admin capability. This codebase has no admin role
+  // (`request.auth.role` is 'student' | 'teacher'), so the teacher surface must
+  // stay strictly one-exam-per-call: the create schemas are objects, never
+  // arrays, and an array body dies in the validator before the service runs.
+  it('refuses a batch of exams from a teacher token', async () => {
+    const service = createService();
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp)
+      .post('/teacher/exam-groups/' + groupRouteId + '/assessments')
+      .set('Idempotency-Key', 'key-bulk')
+      .send([assessmentInput, { ...assessmentInput, title: 'Physics' }] as never)
+      .expect(400);
+
+    expect(service.createAssessment).not.toHaveBeenCalled();
+  });
+
+  it('refuses a batch of exam groups from a teacher token', async () => {
+    const service = createService();
+    const teacherApp = createTestApp(service, { role: 'teacher', userId: teacherId });
+
+    await request(teacherApp)
+      .post('/teacher/classes/' + schoolId + '/exam-groups')
+      .set('Idempotency-Key', 'key-bulk-group')
+      .send([groupInput, { ...groupInput, title: 'Term 2' }] as never)
+      .expect(400);
+
+    expect(service.createGroup).not.toHaveBeenCalled();
+  });
+});

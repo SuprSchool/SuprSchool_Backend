@@ -51,6 +51,11 @@ function createDependencies(): AppDependencies {
       address: '', description: [], events: [], gallery: [], id: schoolId,
       name: 'SuprSchool', rating: '—', rules: [], rulesIntro: '', studentCount: 1, teacherCount: 1,
     }),
+    getStudentDirectoryProfile: vi.fn().mockResolvedValue({
+      avatar: null, classSection: '10-A', id: studentId, interests: [], name: 'Student',
+      rollNumber: '1', schoolName: 'SuprSchool',
+      stats: { classRank: '—', eventsParticipated: 0, points: 0, streakDays: 0 },
+    }),
     getStudentOverview: vi.fn().mockResolvedValue({
       announcementCount: 0, classSection: '10-A', id: studentId, rollNumber: '1', schoolName: 'SuprSchool',
       stats: { attendance: '100%', avgScore: '—', classRank: '—', eventsParticipated: 0, points: 0, streakDays: 0 },

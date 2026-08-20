@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
   CommunityProfileRepository,
   SchoolContentRecord,
+  StudentOverviewRecord,
 } from '../src/db/repositories/community-profile.repository.js';
 import { createCommunityProfileService } from '../src/services/community-profile.service.js';
 import {
@@ -174,6 +175,168 @@ describe('community profile service', () => {
     await expect(
       service.getCurrentSchool(toCommunityIdentity(profile, 'student')),
     ).rejects.toThrow(/invalid object path/i);
+  });
+});
+
+/**
+ * `648:10485` — one student as the rest of their school sees them.
+ *
+ * The tenancy argument for this read is that the subject is resolved with the
+ * *viewer's* school id, so these assert that pairing directly rather than
+ * trusting the SQL.
+ */
+describe('community profile service: student directory profile', () => {
+  const viewerSchoolId = profile.schoolId;
+  const subjectId = '00000000-0000-4000-8000-000000000202';
+  const teacherViewer = {
+    role: 'teacher' as const,
+    schoolId: viewerSchoolId,
+    userId: '00000000-0000-4000-8000-000000000102',
+  };
+
+  function createOverview(
+    overrides: Partial<StudentOverviewRecord> = {},
+  ): StudentOverviewRecord {
+    return {
+      announcementCount: 7,
+      attendance: '94.3%',
+      classId: '00000000-0000-4000-8000-000000000301',
+      classSection: 'Class 9th - B',
+      id: subjectId,
+      rollNumber: '23',
+      schoolId: viewerSchoolId,
+      schoolName: 'Riverside International School',
+      streakDays: 12,
+      ...overrides,
+    };
+  }
+
+  function createDirectoryService(options: {
+    descriptor?: ProfileDescriptor | undefined;
+    eventsParticipated?: number;
+    omitDescriptorReader?: boolean;
+    overview?: StudentOverviewRecord | null;
+    progress?: { classRank: number | null; points: number };
+  } = {}) {
+    const overview = options.overview === undefined ? createOverview() : options.overview;
+    const findStudentOverview = vi.fn(async () => overview);
+    const getProfile = vi.fn(async () => options.descriptor ?? {
+      ...profile,
+      displayName: 'John Smith',
+      id: subjectId,
+    });
+    const countParticipated = vi.fn(async () => options.eventsParticipated ?? 4);
+    const getStudentProgress = vi.fn(async () => (
+      options.progress ?? { classRank: 5, points: 850 }
+    ));
+    const service = createCommunityProfileService({
+      assessmentSummaryReader: { getStudentAverage: vi.fn(async () => 91.25) },
+      eventSummaryReader: {
+        countConducted: vi.fn(async () => 0),
+        countParticipated,
+        listVisible: vi.fn(async () => []),
+      },
+      ...(options.omitDescriptorReader === true
+        ? {}
+        : { profileDescriptorReader: { getProfile } }),
+      repository: {
+        findCurrentSchool: vi.fn(async () => null),
+        findStudentOverview,
+        findTeacherOverview: vi.fn(async () => null),
+        findVisibleSchoolEvents: vi.fn(async () => []),
+      },
+      schoolAssetUrlSigner: { createSignedDownloadUrl: vi.fn(async () => 'https://unused') },
+      studentProgressSummaryReader: { getStudentProgress },
+    });
+    return { countParticipated, findStudentOverview, getProfile, getStudentProgress, service };
+  }
+
+  it('resolves the subject inside the viewer school and returns the frame fields', async () => {
+    const { findStudentOverview, getProfile, getStudentProgress, service } =
+      createDirectoryService();
+
+    const view = await service.getStudentDirectoryProfile(teacherViewer, subjectId);
+
+    expect(findStudentOverview).toHaveBeenCalledWith(
+      { role: 'student', schoolId: viewerSchoolId, userId: subjectId },
+      expect.any(Date),
+    );
+    expect(getProfile).toHaveBeenCalledWith(subjectId, viewerSchoolId);
+    expect(getStudentProgress).toHaveBeenCalledWith({
+      classId: '00000000-0000-4000-8000-000000000301',
+      schoolId: viewerSchoolId,
+      studentId: subjectId,
+    });
+    expect(view).toEqual({
+      avatar: { kind: 'preset', value: 'avatar-1' },
+      classSection: 'Class 9th - B',
+      id: subjectId,
+      interests: ['Coding', 'Reading', 'Art', 'Music', 'Sports'],
+      name: 'John Smith',
+      rollNumber: '23',
+      schoolName: 'Riverside International School',
+      stats: {
+        classRank: '#5',
+        eventsParticipated: 4,
+        points: 850,
+        streakDays: 12,
+      },
+    });
+  });
+
+  // The self-overview carries all four. None of them belong to a viewer.
+  it('never publishes the phone number, attendance, average score or unread count', async () => {
+    const { service } = createDirectoryService();
+
+    const view = await service.getStudentDirectoryProfile(teacherViewer, subjectId);
+
+    expect(view).not.toHaveProperty('phoneE164');
+    expect(view).not.toHaveProperty('announcementCount');
+    expect(view.stats).not.toHaveProperty('attendance');
+    expect(view.stats).not.toHaveProperty('avgScore');
+    expect(Object.keys(view.stats).sort()).toEqual([
+      'classRank', 'eventsParticipated', 'points', 'streakDays',
+    ]);
+  });
+
+  // A student in another school has no active membership in the viewer's, so
+  // the shared query returns null. It must read as "no such student", not as
+  // "there is one but you may not see it".
+  it('is a 404, not a 403, when the subject is outside the viewer school', async () => {
+    const { getProfile, service } = createDirectoryService({ overview: null });
+
+    await expect(service.getStudentDirectoryProfile(teacherViewer, subjectId))
+      .rejects.toMatchObject({ code: 'NOT_FOUND', status: 404 });
+    // The descriptor is never read, so nothing about the subject is touched.
+    expect(getProfile).not.toHaveBeenCalled();
+  });
+
+  it('serves a student viewer the same payload as a teacher viewer', async () => {
+    const { service } = createDirectoryService();
+
+    const asStudent = await service.getStudentDirectoryProfile(
+      toCommunityIdentity(profile, 'student'),
+      subjectId,
+    );
+    const asTeacher = await service.getStudentDirectoryProfile(teacherViewer, subjectId);
+
+    expect(asStudent).toEqual(asTeacher);
+  });
+
+  it('renders an em dash when no ranking snapshot covers the subject', async () => {
+    const { service } = createDirectoryService({ progress: { classRank: null, points: 0 } });
+
+    const view = await service.getStudentDirectoryProfile(teacherViewer, subjectId);
+
+    expect(view.stats.classRank).toBe('—');
+    expect(view.stats.points).toBe(0);
+  });
+
+  it('fails loudly rather than serving a nameless profile when unwired', async () => {
+    const { service } = createDirectoryService({ omitDescriptorReader: true });
+
+    await expect(service.getStudentDirectoryProfile(teacherViewer, subjectId))
+      .rejects.toMatchObject({ code: 'INTERNAL_ERROR', status: 500 });
   });
 });
 

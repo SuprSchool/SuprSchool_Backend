@@ -1,4 +1,4 @@
-import type { ProfileDescriptor } from './profile.js';
+import type { ProfileAvatar, ProfileDescriptor, ProfileInterest } from './profile.js';
 
 export type CommunityRole = 'student' | 'teacher';
 
@@ -67,6 +67,57 @@ export interface TeacherProfileOverview {
     testsConducted: number;
   };
   announcementCount: number;
+}
+
+/**
+ * Another student's profile as everyone else in the same school sees it
+ * (frame `648:10485`).
+ *
+ * Deliberately narrower than `StudentProfileOverview`, which describes the
+ * caller to themselves. Four things it drops on purpose:
+ *
+ * - `phoneE164`, which `ProfileDescriptor` carries and no viewer needs.
+ * - `attendance`, the percentage the self-profile leads with. A peer's
+ *   attendance record is pastoral data, not community data.
+ * - `avgScore`, for the same reason — assessment results belong to the student
+ *   and their teachers.
+ * - `announcementCount`, an unread badge that is meaningless about anyone else.
+ *
+ * What is left is already visible to exactly this audience elsewhere in the
+ * product: class rank and points on the class ranking and event leaderboards,
+ * event participation on the participants list, name, avatar, class and roll
+ * number on every class roster. `streakDays` is a derived attendance *shape*
+ * — consecutive days present — not the record itself, and the design gives it
+ * a tile; it stays.
+ */
+export interface StudentDirectoryProfile {
+  avatar: ProfileAvatar | null;
+  /** `classes.display_name`, e.g. "Class 9th - B". */
+  classSection: string;
+  id: string;
+  interests: readonly ProfileInterest[];
+  name: string;
+  /** `—` when the enrolment carries no roll number, as the self-overview does. */
+  rollNumber: string;
+  schoolName: string;
+  stats: {
+    /** `#5`, or `—` when no ranking snapshot covers this student yet. */
+    classRank: string;
+    eventsParticipated: number;
+    points: number;
+    streakDays: number;
+  };
+}
+
+/**
+ * Reads the name, avatar and interests of a user in a given school.
+ *
+ * A port rather than a direct `ProfileService` dependency so the community
+ * feature does not import the profile feature's service surface — and so the
+ * avatar arrives already signed, which a repository cannot do.
+ */
+export interface CommunityProfileDescriptorReader {
+  getProfile(userId: string, schoolId: string): Promise<ProfileDescriptor>;
 }
 
 export interface AssessmentSummaryReader {

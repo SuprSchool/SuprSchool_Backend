@@ -3,10 +3,13 @@ import type { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 
+import { AppError } from '../src/lib/errors.js';
 import type { AuthenticationMiddleware } from '../src/middleware/authenticate.js';
+import { errorHandler } from '../src/middleware/error-handler.js';
 import {
   createSchoolRouter,
   createStudentCommunityProfileRouter,
+  createStudentDirectoryRouter,
   createTeacherCommunityProfileRouter,
 } from '../src/routes/community-profile.routes.js';
 import type { CommunityProfileService } from '../src/services/community-profile.service.js';
@@ -59,6 +62,23 @@ function createService(): CommunityProfileService {
         streakDays: 4,
       },
     })),
+    getStudentDirectoryProfile: vi.fn(async (identity, targetId) => {
+      // Stands in for the real read: the subject only resolves inside the
+      // caller's school, and anywhere else is indistinguishable from absent.
+      if (identity.schoolId !== schoolId) {
+        throw new AppError('NOT_FOUND', 404, 'Student not found');
+      }
+      return {
+        avatar: { kind: 'preset' as const, value: 'avatar-1' },
+        classSection: 'Class 9th - B',
+        id: targetId,
+        interests: ['Coding' as const, 'Reading' as const],
+        name: 'John Smith',
+        rollNumber: '23',
+        schoolName: 'Riverside International School',
+        stats: { classRank: '#5', eventsParticipated: 4, points: 850, streakDays: 12 },
+      };
+    }),
     getTeacherOverview: vi.fn(async (identity) => ({
       announcementCount: 2,
       classTeacher: 'Class 10-A',
@@ -96,9 +116,14 @@ function createTestApp() {
   app.use('/v1/student/profile', createStudentCommunityProfileRouter(service, authenticate));
   app.use('/v1/teacher/profile', createTeacherCommunityProfileRouter(service, authenticate));
   app.use('/v1/schools', createSchoolRouter(service, authenticate));
+  app.use('/v1/students', createStudentDirectoryRouter(service, authenticate));
+  // Without it a rejected param reaches Express's default handler as a 500.
+  app.use(errorHandler);
 
   return { app, service };
 }
+
+const subjectId = '00000000-0000-4000-8000-000000000202';
 
 describe('community profile REST API', () => {
   it('returns a student overview for the token owner without interests or avatar', async () => {
@@ -163,6 +188,56 @@ describe('community profile REST API', () => {
 
     expect(response.body.phone).toBe('+911234567890');
     expect(response.body.supportEmail).toBe('help@school.example');
+  });
+
+  // 648:10485. Reached from a teacher's participant and submission cards and
+  // from a student's event leaderboard, so both roles must get through.
+  it('returns another student\'s profile to a teacher and to a student alike', async () => {
+    const { app, service } = createTestApp();
+
+    const asTeacher = await request(app)
+      .get(`/v1/students/${subjectId}/profile`)
+      .set('authorization', 'Bearer teacher')
+      .expect(200);
+    const asStudent = await request(app)
+      .get(`/v1/students/${subjectId}/profile`)
+      .expect(200);
+
+    expect(asTeacher.body).toEqual(asStudent.body);
+    expect(asTeacher.body).toEqual({
+      avatar: { kind: 'preset', value: 'avatar-1' },
+      classSection: 'Class 9th - B',
+      id: subjectId,
+      interests: ['Coding', 'Reading'],
+      name: 'John Smith',
+      rollNumber: '23',
+      schoolName: 'Riverside International School',
+      stats: { classRank: '#5', eventsParticipated: 4, points: 850, streakDays: 12 },
+    });
+    expect(service.getStudentDirectoryProfile).toHaveBeenCalledWith(
+      { role: 'teacher', schoolId, userId: teacherId },
+      subjectId,
+    );
+  });
+
+  it('is a 404 for a caller from another school', async () => {
+    const { app } = createTestApp();
+
+    await request(app)
+      .get(`/v1/students/${subjectId}/profile`)
+      .set('authorization', 'Bearer other-school')
+      .expect(404);
+  });
+
+  it('rejects a non-uuid subject and any extra query input', async () => {
+    const { app, service } = createTestApp();
+
+    await request(app).get('/v1/students/not-a-uuid/profile').expect(400);
+    await request(app)
+      .get(`/v1/students/${subjectId}/profile`)
+      .query({ schoolId: otherSchoolId })
+      .expect(400);
+    expect(service.getStudentDirectoryProfile).not.toHaveBeenCalled();
   });
 
   it('returns the event card fields the school Events tab draws', async () => {

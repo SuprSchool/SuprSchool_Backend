@@ -130,9 +130,40 @@ export interface AssignmentSubmission {
   // contract's.
   completedAt: string | null;
   feedback?: string | undefined;
+  /**
+   * `assignment_submissions.display_name` — the file the student uploaded.
+   * 526:12658 / 667:3274 / 667:3533 / 543:13354 all draw an `Assignment.pdf`
+   * tile on every submitted row, and 408:10557 draws it again on the grading
+   * screen; without this the tile could never render. Absent on a roster row
+   * that has no upload.
+   */
+  fileName?: string | undefined;
+  /**
+   * A short-lived signed read URL for that file, so the teacher can actually
+   * open what the student handed in. Absent when there is no upload. The bucket
+   * is private, so the path alone is not openable.
+   */
+  fileUrl?: string | undefined;
   gradedAt?: string | undefined;
+  /**
+   * The submission row id when the student has one, and the STUDENT id when the
+   * roster read below produced a row for a student who never opened an upload
+   * session. Callers that need to address a real submission (grading) must gate
+   * on `submittedAt`; callers addressing the student (completion, reminders)
+   * must use `studentId`, which is always the student.
+   */
   id: string;
+  /** `assignments.is_graded` — the assignment's own mode, denormalised so the
+   * submissions screen can pick its second tab (Graded vs Completed) without a
+   * second fetch. */
+  isGradedAssignment?: boolean | undefined;
   marks?: number | undefined;
+  /**
+   * `assignments.max_marks`, denormalised onto every row. 408:10557 draws
+   * `0/35`, and with no total on the contract the client had nothing to divide
+   * by and pinned it to 0, which disabled marks entry entirely.
+   */
+  maxMarks?: number | undefined;
   studentId: string;
   /**
    * `user_profiles.display_name` of the submitting student, joined school-scoped

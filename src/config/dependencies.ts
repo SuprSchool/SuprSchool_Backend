@@ -131,6 +131,19 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
     repository: rankingRepository,
   });
   const communityReaders = createCommunityReaders(db);
+  /*
+    Built here rather than inline in the returned object because the community
+    service now reads through it: viewing another student's profile needs that
+    student's name, avatar and interests, and `getProfile` is the one place
+    that signs an uploaded avatar into a URL.
+  */
+  const profileService = createProfileService({
+    repository: profiles,
+    avatarUrlSigner: {
+      createSignedDownloadUrl: (bucket, objectPath) =>
+        platform.storage.createSignedReadUrl(bucket, objectPath, 15 * 60),
+    },
+  });
   const communityProfileService = createCommunityProfileService({
     assessmentSummaryReader: communityReaders,
     eventSummaryReader: {
@@ -142,6 +155,7 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
       // that the card carries a banner, a registration count and eligibility.
       listVisible: (identity) => community.findVisibleSchoolEvents(identity),
     },
+    profileDescriptorReader: profileService,
     repository: community,
     schoolAssetUrlSigner: {
       createSignedDownloadUrl: (bucket, objectPath, expiresInSeconds) =>
@@ -182,13 +196,7 @@ export function createRuntimeDependencies(env: Env): AppDependencies {
     }),
     communityProfileService,
     pointsService: new PointsService(pointsRepository, rankings),
-    profileService: createProfileService({
-      repository: profiles,
-      avatarUrlSigner: {
-        createSignedDownloadUrl: (bucket, objectPath) =>
-          platform.storage.createSignedReadUrl(bucket, objectPath, 15 * 60),
-      },
-    }),
+    profileService,
     announcementService: createAnnouncementsService({
       files,
       mutations,
