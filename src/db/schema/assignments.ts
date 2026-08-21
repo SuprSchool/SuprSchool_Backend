@@ -85,11 +85,22 @@ export const assignmentResources = pgTable(
     uploadSessionId: uuid('upload_session_id').notNull(),
     objectPath: text('object_path').notNull(),
     displayName: text('display_name').notNull(),
+    // `banner` is the assignment header image: it is surfaced as
+    // `AssignmentDetail.bannerUrl` and excluded from the resources list, so the
+    // detail screens draw it as a header rather than as one more file tile.
+    // Every row written before this column existed reads `resource`.
+    role: text('role').$type<'banner' | 'resource'>().notNull().default('resource'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    check('assignment_resources_role_check', sql`${table.role} in ('banner', 'resource')`),
     uniqueIndex('assignment_resources_upload_session_unique').on(table.uploadSessionId),
     uniqueIndex('assignment_resources_object_path_unique').on(table.objectPath),
+    // At most one banner per assignment. In the database rather than only in the
+    // service: two confirms can race, and a read-then-insert check lets both win.
+    uniqueIndex('assignment_resources_one_banner_per_assignment')
+      .on(table.assignmentId)
+      .where(sql`${table.role} = 'banner'`),
     index('assignment_resources_parent_idx').on(
       table.schoolId,
       table.assignmentId,
@@ -111,6 +122,13 @@ export const assignmentSubmissions = pgTable(
     displayName: text('display_name'),
     submittedAt: timestamp('submitted_at', { withTimezone: true }),
     marks: doublePrecision('marks'),
+    // The letter awarded on an assignment whose `grading_type` is `Alphabetic`.
+    // Mutually exclusive with `marks` — see the grade shape check below. Without
+    // it an alphabetic assignment was gradable in name only: the submission had
+    // nowhere to put the letter, so the grading screen fell back to "0/0".
+    letterGrade: text('letter_grade').$type<
+      'A+' | 'A' | 'B+' | 'B' | 'C+' | 'C' | 'D' | 'E' | 'F'
+    >(),
     feedback: text('feedback'),
     gradedAt: timestamp('graded_at', { withTimezone: true }),
     gradedByTeacherId: uuid('graded_by_teacher_id').references(() => userProfiles.id, { onDelete: 'restrict' }),
@@ -124,15 +142,29 @@ export const assignmentSubmissions = pgTable(
     unique('assignment_submissions_assignment_student_unique').on(table.assignmentId, table.studentId),
     uniqueIndex('assignment_submissions_upload_session_unique').on(table.uploadSessionId),
     uniqueIndex('assignment_submissions_object_path_unique').on(table.objectPath),
+    // A submission carries a complete file triple or no file at all; a PARTIAL
+    // triple is the corruption this check exists for. `submitted_at` is
+    // deliberately independent of the file: uploading work is optional, so a
+    // student may submit with nothing attached. The previous shape coupled the
+    // two and made a fileless submission unrepresentable.
     check(
       'assignment_submissions_file_shape_check',
-      sql`(${table.uploadSessionId} is null and ${table.objectPath} is null and ${table.displayName} is null and ${table.submittedAt} is null)
-        or (${table.uploadSessionId} is not null and ${table.objectPath} is not null and ${table.displayName} is not null and ${table.submittedAt} is not null)`,
+      sql`num_nonnulls(${table.uploadSessionId}, ${table.objectPath}, ${table.displayName}) = 0
+        or (num_nonnulls(${table.uploadSessionId}, ${table.objectPath}, ${table.displayName}) = 3 and ${table.submittedAt} is not null)`,
     ),
     check(
+      'assignment_submissions_letter_grade_check',
+      sql`${table.letterGrade} is null
+        or ${table.letterGrade} in ('A+', 'A', 'B+', 'B', 'C+', 'C', 'D', 'E', 'F')`,
+    ),
+    // A graded row carries exactly one of marks / letter_grade, never both and
+    // never neither. The previous shape required `marks`, which made an
+    // alphabetic grade — a grader and a graded instant but no marks —
+    // unrepresentable.
+    check(
       'assignment_submissions_grade_shape_check',
-      sql`(${table.marks} is null and ${table.gradedAt} is null and ${table.gradedByTeacherId} is null)
-        or (${table.marks} is not null and ${table.gradedAt} is not null and ${table.gradedByTeacherId} is not null)`,
+      sql`(${table.marks} is null and ${table.letterGrade} is null and ${table.gradedAt} is null and ${table.gradedByTeacherId} is null)
+        or (num_nonnulls(${table.marks}, ${table.letterGrade}) = 1 and ${table.gradedAt} is not null and ${table.gradedByTeacherId} is not null)`,
     ),
     index('assignment_submissions_teacher_cursor_idx').on(
       table.schoolId,

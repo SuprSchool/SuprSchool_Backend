@@ -32,6 +32,7 @@ const identity: AssignmentIdentity = { schoolId, userId: teacherId };
 
 function createService(): AssignmentsService {
   return {
+    bulkSetCompletion: vi.fn(),
     confirmResource: vi.fn(),
     confirmSubmission: vi.fn(),
     create: vi.fn(),
@@ -49,6 +50,7 @@ function createService(): AssignmentsService {
     remindStudent: vi.fn(),
     setCompletion: vi.fn(),
     setStudentCompletion: vi.fn(),
+    submitWithoutFile: vi.fn(),
     update: vi.fn(),
   };
 }

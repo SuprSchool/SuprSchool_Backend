@@ -48,6 +48,7 @@ const assignmentWithoutRubrics: Omit<typeof validAssignment, 'rubrics'> = (() =>
 
 function createService(): AssignmentsService {
   return {
+    bulkSetCompletion: vi.fn(),
     confirmResource: vi.fn(),
     confirmSubmission: vi.fn(),
     create: vi.fn(),
@@ -65,6 +66,7 @@ function createService(): AssignmentsService {
     remindStudent: vi.fn(),
     setCompletion: vi.fn(),
     setStudentCompletion: vi.fn(),
+    submitWithoutFile: vi.fn(),
     update: vi.fn(),
   };
 }
@@ -213,11 +215,16 @@ describe('assignments router', () => {
       .send(metadata)
       .expect(201);
 
+    // A body that never mentions a role still produces an ordinary resource:
+    // the validator defaults it, so the banner slot is opt-in and no existing
+    // caller changes behaviour.
     expect(service.createResourceUploadSession).toHaveBeenCalledWith(
-      { schoolId, userId: teacherId }, assignmentRouteId, metadata, 'assignment-resource-create',
+      { schoolId, userId: teacherId }, assignmentRouteId,
+      { ...metadata, role: 'resource' }, 'assignment-resource-create',
     );
     expect(service.confirmResource).toHaveBeenCalledWith(
-      { schoolId, userId: teacherId }, assignmentRouteId, uploadSessionId, 'assignment-resource-confirm',
+      { schoolId, userId: teacherId }, assignmentRouteId, uploadSessionId,
+      'assignment-resource-confirm', 'resource',
     );
     expect(service.createSubmissionUploadSession).toHaveBeenCalledWith(
       { schoolId, userId: studentId }, assignmentRouteId, metadata, 'assignment-submission-create',
@@ -273,16 +280,18 @@ describe('assignment review regressions', () => {
     const callback: RemoteCallback = async () => ({
       rows: [[
         new Date('2026-07-01T08:00:00.000Z'), // assignedAt (assignments.created_at)
-        new Date('2026-07-20T12:00:00.000Z'),
-        null,
-        'Numeric',
-        assignmentRouteId,
-        true,
-        null,
+        null, // completedAt
+        new Date('2026-07-20T12:00:00.000Z'), // dueAt
+        null, // gradedAt
+        'Numeric', // gradingType
+        assignmentRouteId, // id
+        true, // isGraded
+        null, // letterGrade
+        null, // marks
         schoolId,
         validAssignment.subjectId,
-        'Mathematics',
-        null,
+        'Mathematics', // subjectName
+        null, // submittedAt
         validAssignment.title,
       ]],
     });
@@ -627,6 +636,7 @@ describe('assignment review regressions', () => {
     await service.createResourceUploadSession(identity, 'a1', {
       contentType: 'application/pdf',
       displayName: 'worksheet.pdf',
+      role: 'resource',
       sizeBytes: 512,
     }, 'resource-create-parent-1');
     await service.confirmResource(identity, 'a1', uploadSessionId, 'resource-confirm-parent-1');
@@ -699,6 +709,7 @@ describe('assignment review regressions', () => {
       displayName: 'worksheet.pdf',
       identity: { schoolId, userId: teacherId },
       objectPath: 'resource-object-path',
+      role: 'resource',
       uploadSessionId,
     });
 
@@ -917,6 +928,8 @@ describe('assignment display codes and due timestamps', () => {
     const service = createService();
     vi.mocked(service.create).mockResolvedValue({
       assignedAt: '2026-07-01T08:00:00.000Z',
+      banner: null,
+      bannerUrl: null,
       classId: classRouteId,
       displayCode: `${displayCodePrefix}001`,
       dueAt: validAssignment.dueAt,
@@ -1346,6 +1359,7 @@ describe('student assignment assignedAt timestamps', () => {
         gradingType: 'Numeric',
         id: assignmentRouteId,
         isGradedAssignment: true,
+        studentStatus: 'pending',
         subjectId: validAssignment.subjectId,
         subjectName: 'Mathematics',
         title: validAssignment.title,
@@ -1365,6 +1379,8 @@ describe('student assignment assignedAt timestamps', () => {
     const service = createService();
     vi.mocked(service.getForStudent).mockResolvedValue({
       assignedAt,
+      banner: null,
+      bannerUrl: null,
       classId: classRouteId,
       displayCode: `ASG-${new Date().getUTCFullYear()}-004`,
       dueAt,
@@ -1391,11 +1407,13 @@ describe('student assignment assignedAt timestamps', () => {
     const callback: RemoteCallback = async () => ({
       rows: [[
         new Date(assignedAt),          // assignedAt (assignments.created_at)
+        null,                          // completedAt
         new Date(dueAt),               // dueAt
         null,                          // gradedAt
         'Numeric',                     // gradingType
         assignmentRouteId,             // id
         true,                          // isGraded
+        null,                          // letterGrade
         null,                          // marks
         schoolId,                      // schoolId
         validAssignment.subjectId,     // subjectId
@@ -1423,8 +1441,11 @@ describe('student assignment assignedAt timestamps', () => {
   it('carries minute-level precision, so an age finer than a day is derivable', async () => {
     const callback: RemoteCallback = async () => ({
       rows: [[
-        new Date('2026-08-10T04:58:30.000Z'),
-        new Date(dueAt), null, 'Numeric', assignmentRouteId, true, null,
+        new Date('2026-08-10T04:58:30.000Z'), // assignedAt
+        null,                                 // completedAt
+        new Date(dueAt), null, 'Numeric', assignmentRouteId, true,
+        null,                                 // letterGrade
+        null,                                 // marks
         schoolId, validAssignment.subjectId, 'Mathematics', null, validAssignment.title,
       ]],
     });
@@ -1649,15 +1670,19 @@ describe('submission student names', () => {
       queries.push(query);
       queryCount += 1;
       return {
+        // Positional, in the exact order `listSubmissions` selects: the
+        // pg-proxy driver maps by index, so a column added to the select has to
+        // be added here too or every later field reads its neighbour's value.
         rows: queryCount === 1 ? [{ id: 'a1' }] : [[
           assignmentRouteId,                    // assignmentId
           null,                                 // completedAt
           null,                                 // feedback
+          null,                                 // fileName
           null,                                 // gradedAt
           draftSubmissionId,                    // id
+          null,                                 // letterGrade
           null,                                 // marks
           null,                                 // objectPath
-          schoolId,                             // schoolId
           studentId,                            // studentId
           'Asha Patel',                         // studentName
           new Date('2026-07-15T09:00:00.000Z'), // submittedAt
@@ -1691,6 +1716,7 @@ describe('submission student names', () => {
         null,                                 // feedback
         new Date('2026-07-16T09:00:00.000Z'), // gradedAt
         draftSubmissionId,                    // id
+        null,                                 // letterGrade
         8,                                    // marks
         null,                                 // objectPath
         studentId,                            // studentId

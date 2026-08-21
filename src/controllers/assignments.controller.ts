@@ -6,7 +6,9 @@ import {
   assignmentIdParamSchema,
   assignmentResourceParamsSchema,
   assignmentResourceUploadSchema,
+  bulkCompletionSchema,
   classIdParamSchema,
+  confirmResourceUploadSchema,
   confirmUploadSchema,
   createAssignmentSchema,
   emptyBodySchema,
@@ -17,6 +19,7 @@ import {
   submissionIdParamSchema,
   submissionListQuerySchema,
   submissionUploadSchema,
+  submitWithoutFileSchema,
   teacherAssignmentListQuerySchema,
   updateAssignmentSchema,
 } from '../validators/assignments.schemas.js';
@@ -40,6 +43,7 @@ function idempotencyKey(request: Request): string {
 }
 
 export interface AssignmentsController {
+  bulkSetCompletion(request: Request, response: Response): Promise<void>;
   confirmResource(request: Request, response: Response): Promise<void>;
   confirmSubmission(request: Request, response: Response): Promise<void>;
   create(request: Request, response: Response): Promise<void>;
@@ -55,6 +59,7 @@ export interface AssignmentsController {
   listSubmissions(request: Request, response: Response): Promise<void>;
   setStudentCompletion(request: Request, response: Response): Promise<void>;
   setSubmissionCompletion(request: Request, response: Response): Promise<void>;
+  submitWithoutFile(request: Request, response: Response): Promise<void>;
   remindAll(request: Request, response: Response): Promise<void>;
   remindStudent(request: Request, response: Response): Promise<void>;
   update(request: Request, response: Response): Promise<void>;
@@ -81,6 +86,21 @@ export function createAssignmentsController(service: AssignmentsService): Assign
         identity(request, 'student'),
         assignmentIdParamSchema.parse(request.params).assignmentId,
         submissionUploadSchema.parse(request.body),
+        idempotencyKey(request),
+      ));
+    },
+
+    // Submitting with nothing attached. The body is `{}` and is parsed
+    // leniently rather than `.strict()`: there is nothing here a client could
+    // usefully state, and anything it does send — a `submittedAt` of its own,
+    // say — is stripped before the service sees it, so the server clock stays
+    // the only source of the instant. A request with no body at all is the
+    // same request as `{}`.
+    async submitWithoutFile(request, response) {
+      submitWithoutFileSchema.parse(request.body ?? {});
+      response.status(201).json(await service.submitWithoutFile(
+        identity(request, 'student'),
+        assignmentIdParamSchema.parse(request.params).assignmentId,
         idempotencyKey(request),
       ));
     },
@@ -185,6 +205,17 @@ export function createAssignmentsController(service: AssignmentsService): Assign
       );
     },
 
+    // The whole class in one call. 200, not 202: the write is synchronous and
+    // the count it reports is the count that committed.
+    async bulkSetCompletion(request, response) {
+      const identityValue = identity(request, 'teacher');
+      const { assignmentId } = assignmentIdParamSchema.parse(request.params);
+      const { scope } = bulkCompletionSchema.parse(request.body);
+      response.status(200).json(
+        await service.bulkSetCompletion(identityValue, assignmentId, scope),
+      );
+    },
+
     async remindStudent(request, response) {
       emptyBodySchema.parse(request.body);
       response.status(202).json(await service.remindStudent(
@@ -214,12 +245,13 @@ export function createAssignmentsController(service: AssignmentsService): Assign
     },
 
     async confirmResource(request, response) {
-      const input = confirmUploadSchema.parse(request.body);
+      const input = confirmResourceUploadSchema.parse(request.body);
       response.status(201).json(await service.confirmResource(
         identity(request, 'teacher'),
         assignmentIdParamSchema.parse(request.params).assignmentId,
         input.uploadSessionId,
         idempotencyKey(request),
+        input.role,
       ));
     },
   };

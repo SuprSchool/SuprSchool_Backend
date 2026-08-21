@@ -23,13 +23,17 @@ import {
 import type {
   AssignmentGradingType,
   AssignmentIdentity,
+  AssignmentLetterGrade,
+  AssignmentResourceRole,
   AssignmentRubric,
   AssignmentSubmission,
+  BulkCompletionScope,
   CreateAssignmentInput,
   CursorPage,
   GradeSubmissionInput,
   StudentAssignmentItem,
   StudentAssignmentListQuery,
+  StudentAssignmentProgress,
   SubmissionCompletion,
   SubmissionCompletionAction,
   SubmissionCursor,
@@ -39,6 +43,7 @@ import type {
   UpdateAssignmentInput,
 } from '../../types/assignments.js';
 import {
+  assignmentLetterGradeValues,
   encodeAssignmentCreatedCursor,
   encodeAssignmentDueCursor,
   encodeSubmissionCursor,
@@ -52,6 +57,13 @@ export interface StoredAssignmentResource {
 
 export interface StoredAssignmentDetail {
   assignedAt: string;
+  /**
+   * The banner attachment as stored — the service turns it into the signed
+   * `bannerUrl`. Absent means the assignment has no banner. It is deliberately
+   * *not* also in `resources`: the split happens once, here, so no caller can
+   * forget to exclude it.
+   */
+  banner?: StoredAssignmentResource | undefined;
   classId: string;
   displayCode: string | null;
   dueAt: string;
@@ -71,8 +83,11 @@ export interface StoredAssignmentDetail {
    * pending. Never set for a teacher, and never cached: the detail cache is
    * school-scoped, so per-student fields must be merged outside it.
    */
+  completedAt?: string | undefined;
   gradedAt?: string | undefined;
+  letterGrade?: AssignmentLetterGrade | undefined;
   marks?: number | undefined;
+  studentStatus?: StudentAssignmentProgress | undefined;
   submittedAt?: string | undefined;
 }
 
@@ -87,6 +102,16 @@ export interface StoredSubmission extends AssignmentSubmission {
 }
 
 
+/**
+ * A fileless submission, plus whether this call is the one that actually
+ * submitted it. A replay reports `justSubmitted: false`, so the caller can skip
+ * the outbox event rather than notifying a teacher twice about one submission.
+ */
+export interface StoredFilelessSubmission {
+  justSubmitted: boolean;
+  submission: StoredSubmission;
+}
+
 export type SubmissionConfirmation =
   | { kind: "already_attached"; submission: StoredSubmission }
   | { kind: "attached"; submission: StoredSubmission }
@@ -100,7 +125,41 @@ export interface GradeableSubmission {
   studentId: string;
 }
 
+/**
+ * A bulk mark-as-done, reported by the roster rows it landed on. The student ids
+ * come back so the caller can invalidate exactly those students' caches — a
+ * count alone would force a second roster read to do it.
+ */
+export interface BulkCompletionOutcome {
+  studentIds: ReadonlyArray<string>;
+}
+
+/**
+ * A completion write, carrying who it landed on. The public
+ * `SubmissionCompletion` DTO deliberately does not name the student, but the
+ * caller has to invalidate exactly that student's cached assignment list — and
+ * without these it would need a second read to find out whose.
+ */
+export interface StoredSubmissionCompletion extends SubmissionCompletion {
+  assignmentId: string;
+  studentId: string;
+}
+
 export interface AssignmentsRepository {
+  /**
+   * Marks every student in `scope` complete in one statement.
+   * `submitted` addresses only roster students with a durable submission;
+   * `all` addresses the whole student-role-guarded roster, creating the empty
+   * submission rows the absentees do not have. Returns `undefined` when the
+   * assignment is not this teacher's to manage — the same single 404 the
+   * per-student endpoint gives, which must not confirm why.
+   */
+  bulkSetCompletion(
+    identity: AssignmentIdentity,
+    assignmentId: string,
+    scope: BulkCompletionScope,
+    completedAt: Date,
+  ): Promise<BulkCompletionOutcome | undefined>;
   canAccessSubmission(identity: AssignmentIdentity, submissionId: string): Promise<boolean>;
   canManage(identity: AssignmentIdentity, assignmentId: string): Promise<boolean>;
   confirmSubmission(input: {
@@ -147,13 +206,19 @@ export interface AssignmentsRepository {
   ): Promise<StoredSubmission | undefined>;
   findResourceForUpload(identity: AssignmentIdentity, assignmentId: string, uploadSessionId: string): Promise<StoredAssignmentResource | undefined>;
   findSubmissionForUpload(identity: AssignmentIdentity, assignmentId: string, uploadSessionId: string): Promise<StoredSubmission | undefined>;
+  /**
+   * `banner_taken` rather than an exception: the one-banner-per-assignment
+   * unique index is the authority, and a caller that loses that race needs a
+   * 409 with a reason, not a driver error.
+   */
   insertResource(input: {
     assignmentId: string;
     displayName: string;
     identity: AssignmentIdentity;
     objectPath: string;
+    role: AssignmentResourceRole;
     uploadSessionId: string;
-  }): Promise<StoredAssignmentResource | undefined>;
+  }): Promise<StoredAssignmentResource | 'banner_taken' | undefined>;
   listActiveClassIdsForStudent(identity: AssignmentIdentity): Promise<ReadonlyArray<string>>;
   listForStudent(
     identity: AssignmentIdentity,
@@ -184,18 +249,29 @@ export interface AssignmentsRepository {
     studentId: string,
     action: SubmissionCompletionAction,
     completedAt: Date,
-  ): Promise<SubmissionCompletion | undefined>;
+  ): Promise<StoredSubmissionCompletion | undefined>;
   setSubmissionCompletion(
     identity: AssignmentIdentity,
     submissionId: string,
     action: SubmissionCompletionAction,
     completedAt: Date,
-  ): Promise<SubmissionCompletion | undefined>;
+  ): Promise<StoredSubmissionCompletion | undefined>;
   studentCanBeReminded(
     identity: AssignmentIdentity,
     assignmentId: string,
     studentId: string,
   ): Promise<boolean>;
+  /**
+   * Submits with no file attached. Never clears an existing file and never
+   * moves an existing `submitted_at`, so a replay is indistinguishable from the
+   * first call. `undefined` when the assignment is missing, deleted, in another
+   * school, or the caller is not an active member of its class.
+   */
+  submitWithoutFile(
+    identity: AssignmentIdentity,
+    assignmentId: string,
+    submittedAt: Date,
+  ): Promise<StoredFilelessSubmission | undefined>;
   update(
     identity: AssignmentIdentity,
     assignmentId: string,
@@ -241,6 +317,12 @@ type SubmissionRow = {
   feedback: string | null;
   gradedAt: SubmissionTimestamp;
   id: string;
+  /**
+   * Optional rather than nullable-required: several raw-SQL paths below predate
+   * the column and do not select it, and "this query did not ask" is not the
+   * same statement as "this submission has no letter".
+   */
+  letterGrade?: AssignmentLetterGrade | null | undefined;
   marks: number | null;
   objectPath: string | null;
   studentId: string;
@@ -258,7 +340,27 @@ function toIso(value: Date | null): string | undefined {
   return value === null ? undefined : value.toISOString();
 }
 
+/**
+ * One student's verdict on one assignment, derived from that student's own
+ * submission row.
+ *
+ * Completion outranks submission deliberately: it is the teacher's explicit
+ * closing of the row, it survives after a submission exists, and it is
+ * reachable with no upload at all (the roster upsert writes `completed_at` onto
+ * an otherwise empty row). Both timestamps tolerate the raw-SQL string shape,
+ * because the callers below straddle the query builder and `db.execute`.
+ */
+function studentProgress(
+  completedAt: SubmissionTimestamp,
+  submittedAt: SubmissionTimestamp,
+): StudentAssignmentProgress {
+  if (submissionTimestampIso(completedAt) !== null) return 'completed';
+  if (submissionTimestampIso(submittedAt) !== null) return 'submitted';
+  return 'pending';
+}
+
 const DISPLAY_CODE_UNIQUE_INDEX = 'assignments_display_code_per_school';
+const BANNER_UNIQUE_INDEX = 'assignment_resources_one_banner_per_assignment';
 const DISPLAY_CODE_MAX_ATTEMPTS = 5;
 const UNIQUE_VIOLATION = '23505';
 
@@ -269,17 +371,25 @@ const UNIQUE_VIOLATION = '23505';
  * recomputed count yields the next code. The driver wraps its errors, so the
  * cause chain is walked rather than only the outermost error.
  */
-function isDisplayCodeConflict(error: unknown): boolean {
+function isUniqueViolationOn(error: unknown, constraint: string): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 5; depth += 1) {
     if (typeof current !== 'object' || current === null) return false;
     const candidate = current as { cause?: unknown; code?: unknown; constraint_name?: unknown };
-    if (candidate.code === UNIQUE_VIOLATION && candidate.constraint_name === DISPLAY_CODE_UNIQUE_INDEX) {
+    if (candidate.code === UNIQUE_VIOLATION && candidate.constraint_name === constraint) {
       return true;
     }
     current = candidate.cause;
   }
   return false;
+}
+
+function isDisplayCodeConflict(error: unknown): boolean {
+  return isUniqueViolationOn(error, DISPLAY_CODE_UNIQUE_INDEX);
+}
+
+function isBannerConflict(error: unknown): boolean {
+  return isUniqueViolationOn(error, BANNER_UNIQUE_INDEX);
 }
 
 function toStoredSubmission(row: SubmissionRow): StoredSubmission {
@@ -291,6 +401,9 @@ function toStoredSubmission(row: SubmissionRow): StoredSubmission {
       ? {}
       : { gradedAt: submissionTimestampIso(row.gradedAt) as string }),
     id: row.id,
+    ...(row.letterGrade === null || row.letterGrade === undefined
+      ? {}
+      : { letterGrade: row.letterGrade }),
     ...(row.marks === null ? {} : { marks: row.marks }),
     ...(row.objectPath === null ? {} : { objectPath: row.objectPath }),
     studentId: row.studentId,
@@ -354,11 +467,17 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     const rows = await this.db
       .select({
         assignedAt: assignments.createdAt,
+        // The reading student's own completion, joined below on
+        // `student_id = identity.userId` — so "completed" here means a teacher
+        // closed out THIS student, not that somebody else in the class was
+        // marked done.
+        completedAt: assignmentSubmissions.completedAt,
         dueAt: assignments.dueAt,
         gradedAt: assignmentSubmissions.gradedAt,
         gradingType: assignments.gradingType,
         id: assignments.id,
         isGraded: assignments.isGraded,
+        letterGrade: assignmentSubmissions.letterGrade,
         marks: assignmentSubmissions.marks,
         schoolId: assignments.schoolId,
         subjectId: assignments.subjectId,
@@ -404,12 +523,15 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     const pageRows = rows.slice(0, query.limit);
     const items = pageRows.map((row) => ({
       assignedAt: row.assignedAt.toISOString(),
+      ...(row.completedAt === null ? {} : { completedAt: row.completedAt.toISOString() }),
       dueAt: row.dueAt.toISOString(),
       ...(row.gradedAt === null ? {} : { gradedAt: row.gradedAt.toISOString() }),
       gradingType: row.gradingType,
       id: row.id,
       isGradedAssignment: row.isGraded,
+      ...(row.letterGrade === null ? {} : { letterGrade: row.letterGrade }),
       ...(row.marks === null ? {} : { marks: row.marks }),
+      studentStatus: studentProgress(row.completedAt, row.submittedAt),
       subjectId: row.subjectId,
       subjectName: row.subjectName,
       ...(row.submittedAt === null ? {} : { submittedAt: row.submittedAt.toISOString() }),
@@ -439,7 +561,9 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       this.withDetails(record),
       this.db
         .select({
+          completedAt: assignmentSubmissions.completedAt,
           gradedAt: assignmentSubmissions.gradedAt,
+          letterGrade: assignmentSubmissions.letterGrade,
           marks: assignmentSubmissions.marks,
           submittedAt: assignmentSubmissions.submittedAt,
         })
@@ -456,10 +580,16 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     // detail into a 500.
     const gradedAtIso = submissionTimestampIso(own?.gradedAt ?? null);
     const submittedAtIso = submissionTimestampIso(own?.submittedAt ?? null);
+    const completedAtIso = submissionTimestampIso(own?.completedAt ?? null);
     return {
       ...detail,
+      ...(completedAtIso === null ? {} : { completedAt: completedAtIso }),
       ...(gradedAtIso === null ? {} : { gradedAt: gradedAtIso }),
+      ...(own?.letterGrade === null || own?.letterGrade === undefined
+        ? {}
+        : { letterGrade: own.letterGrade }),
       ...(typeof own?.marks === 'number' ? { marks: own.marks } : {}),
+      studentStatus: studentProgress(own?.completedAt ?? null, own?.submittedAt ?? null),
       ...(submittedAtIso === null ? {} : { submittedAt: submittedAtIso }),
     };
   }
@@ -826,6 +956,94 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     return rows[0];
   }
 
+  /**
+   * Submit with nothing attached.
+   *
+   * Uploading work is optional, so this is the whole submission for a student
+   * who has no file to hand in — and it is also reachable by a student who has
+   * a draft row from opening the upload sheet and then thought better of it.
+   *
+   * `submitted_at` COALESCES onto any instant already stored, so a re-submit
+   * preserves the first one, and — critically — a student who has already
+   * uploaded a file keeps it: this never nulls the file triple, it only ever
+   * fills in a missing `submitted_at`. That makes the write idempotent in the
+   * same way the confirm path is, rather than a second submission that
+   * overwrites the first.
+   *
+   * `justSubmitted` distinguishes the two outcomes for the caller: the coalesce
+   * either took the instant we passed (a real, new submission worth an outbox
+   * event) or kept an older one (a replay, worth nothing).
+   *
+   * Guarded exactly like `upsertSubmissionDraft` — same school, live
+   * assignment, and an ACTIVE class membership for the calling student, so a
+   * student cannot submit to a class they are not in.
+   */
+  public async submitWithoutFile(
+    identity: AssignmentIdentity,
+    assignmentId: string,
+    submittedAt: Date,
+  ): Promise<StoredFilelessSubmission | undefined> {
+    const submittedAtIso = submittedAt.toISOString();
+    const rows = await this.db.execute(sql<SubmissionRow & { justSubmitted: boolean }>`
+      with allowed as (
+        select assignment.id as assignment_id, assignment.school_id
+        from public.assignments assignment
+        join public.class_members member
+          on member.school_id = assignment.school_id
+          and member.class_id = assignment.class_id
+          and member.student_id = ${identity.userId}::uuid
+          and member.is_active
+        where assignment.id = ${assignmentId}::uuid
+          and assignment.school_id = ${identity.schoolId}::uuid
+          and assignment.deleted_at is null
+      ), upserted as (
+        insert into public.assignment_submissions
+          (school_id, assignment_id, student_id, submitted_at, updated_at)
+        select
+          allowed.school_id,
+          allowed.assignment_id,
+          ${identity.userId}::uuid,
+          ${submittedAtIso}::timestamptz,
+          ${submittedAtIso}::timestamptz
+        from allowed
+        on conflict (assignment_id, student_id) do update
+          set submitted_at = coalesce(
+                public.assignment_submissions.submitted_at,
+                excluded.submitted_at
+              ),
+              updated_at = excluded.updated_at
+          where public.assignment_submissions.school_id = ${identity.schoolId}::uuid
+            and public.assignment_submissions.student_id = ${identity.userId}::uuid
+        returning
+          id, assignment_id, student_id, object_path, submitted_at,
+          marks, letter_grade, feedback, graded_at, completed_at
+      )
+      select
+        upserted.id,
+        upserted.assignment_id as "assignmentId",
+        upserted.student_id as "studentId",
+        profile.display_name as "studentName",
+        upserted.object_path as "objectPath",
+        upserted.submitted_at as "submittedAt",
+        upserted.marks,
+        upserted.letter_grade as "letterGrade",
+        upserted.feedback,
+        upserted.graded_at as "gradedAt",
+        upserted.completed_at as "completedAt",
+        (upserted.submitted_at = ${submittedAtIso}::timestamptz) as "justSubmitted"
+      from upserted
+      join public.user_profiles profile
+        on profile.id = upserted.student_id
+        and profile.school_id = ${identity.schoolId}::uuid
+      limit 1
+    `) as unknown as ReadonlyArray<SubmissionRow & { justSubmitted: boolean }>;
+    const row = rows[0];
+    return row === undefined ? undefined : {
+      justSubmitted: row.justSubmitted === true,
+      submission: toStoredSubmission(row),
+    };
+  }
+
   public async confirmSubmission(input: {
     assignmentId: string;
     displayName: string;
@@ -1015,6 +1233,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         fileName: assignmentSubmissions.displayName,
         gradedAt: assignmentSubmissions.gradedAt,
         id: sql<string>`coalesce(${assignmentSubmissions.id}, ${classMembers.studentId})`.as('row_id'),
+        letterGrade: assignmentSubmissions.letterGrade,
         marks: assignmentSubmissions.marks,
         objectPath: assignmentSubmissions.objectPath,
         studentId: classMembers.studentId,
@@ -1056,10 +1275,19 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       )
       .limit(query.limit + 1);
     const pageRows = rows.slice(0, query.limit);
+    // The grading scheme rides on every row beside `maxMarks`, for the same
+    // reason: the grading screen sizes its control from the row it is given and
+    // has no second fetch to fall back on. An alphabetic assignment has no
+    // `maxMarks` at all, so a screen that reads only that saw `0/0` and pinned
+    // the field to zero — the numeric control on an assignment that was never
+    // numeric.
+    const alphabetic = assignment.gradingType === 'Alphabetic';
     const items = pageRows.map((row) => ({
       ...toStoredSubmission(row),
       ...(row.fileName === null ? {} : { fileName: row.fileName }),
+      gradingType: assignment.gradingType,
       isGradedAssignment: assignment.isGraded,
+      ...(alphabetic ? { letterGradeOptions: assignmentLetterGradeValues } : {}),
       ...(assignment.maxMarks === null ? {} : { maxMarks: assignment.maxMarks }),
     }));
     const last = pageRows.at(-1);
@@ -1114,20 +1342,24 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     input: GradeSubmissionInput,
     gradedAt: Date,
   ): Promise<StoredSubmission | undefined> {
+    // Exactly one of the two columns is written and the other is explicitly
+    // nulled, so re-grading a submission from a letter to a mark (or back)
+    // cannot leave both set and trip `assignment_submissions_grade_shape_check`.
     const [updated] = await this.db
       .update(assignmentSubmissions)
       .set({
         ...(input.feedback === undefined ? {} : { feedback: input.feedback }),
         gradedAt,
         gradedByTeacherId: identity.userId,
-        marks: input.marks,
+        letterGrade: input.letterGrade ?? null,
+        marks: input.marks ?? null,
         updatedAt: gradedAt,
       })
       .where(and(
         eq(assignmentSubmissions.id, submissionId),
         eq(assignmentSubmissions.schoolId, identity.schoolId),
         isNotNull(assignmentSubmissions.submittedAt),
-        this.gradeAuthorization(identity, input.marks),
+        this.gradeAuthorization(identity, input),
       ))
       .returning({
         assignmentId: assignmentSubmissions.assignmentId,
@@ -1135,6 +1367,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         feedback: assignmentSubmissions.feedback,
         gradedAt: assignmentSubmissions.gradedAt,
         id: assignmentSubmissions.id,
+        letterGrade: assignmentSubmissions.letterGrade,
         marks: assignmentSubmissions.marks,
         objectPath: assignmentSubmissions.objectPath,
         studentId: assignmentSubmissions.studentId,
@@ -1156,7 +1389,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     submissionId: string,
     action: SubmissionCompletionAction,
     completedAt: Date,
-  ): Promise<SubmissionCompletion | undefined> {
+  ): Promise<StoredSubmissionCompletion | undefined> {
     const [updated] = await this.db
       .update(assignmentSubmissions)
       .set({
@@ -1171,12 +1404,16 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         this.completionAuthorization(identity),
       ))
       .returning({
+        assignmentId: assignmentSubmissions.assignmentId,
         completedAt: assignmentSubmissions.completedAt,
         id: assignmentSubmissions.id,
+        studentId: assignmentSubmissions.studentId,
       });
     return updated === undefined ? undefined : {
+      assignmentId: updated.assignmentId,
       completedAt: updated.completedAt === null ? null : updated.completedAt.toISOString(),
       id: updated.id,
+      studentId: updated.studentId,
     };
   }
 
@@ -1205,7 +1442,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     studentId: string,
     action: SubmissionCompletionAction,
     completedAt: Date,
-  ): Promise<SubmissionCompletion | undefined> {
+  ): Promise<StoredSubmissionCompletion | undefined> {
     const completedAtIso = completedAt.toISOString();
     const inserted = action === 'complete' ? sql`${completedAtIso}::timestamptz` : sql`null`;
     const onConflict = action === 'complete'
@@ -1243,13 +1480,103 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       on conflict (assignment_id, student_id) do update
         set completed_at = ${onConflict},
             updated_at = excluded.updated_at
-      returning id, completed_at as "completedAt"
-    `) as unknown as ReadonlyArray<{ completedAt: Date | string | null; id: string }>;
+      returning
+        id,
+        assignment_id as "assignmentId",
+        student_id as "studentId",
+        completed_at as "completedAt"
+    `) as unknown as ReadonlyArray<{
+      assignmentId: string;
+      completedAt: Date | string | null;
+      id: string;
+      studentId: string;
+    }>;
     const updated = rows[0];
     return updated === undefined ? undefined : {
+      assignmentId: updated.assignmentId,
       completedAt: submissionTimestampIso(updated.completedAt),
       id: updated.id,
+      studentId: updated.studentId,
     };
+  }
+
+  /**
+   * The same upsert as `setStudentCompletion`, over a whole population instead
+   * of one student.
+   *
+   * `findManaged` runs first because the write itself cannot tell the two
+   * zero-row outcomes apart: an assignment this teacher does not own and a
+   * class where nobody is in scope both insert nothing. The guard turns the
+   * first into the single 404 every other completion path gives, and lets the
+   * second answer an honest `completed: 0`.
+   *
+   * `select distinct` is load-bearing: a duplicate roster or role row would
+   * otherwise present the same (assignment, student) pair twice in one
+   * statement, and Postgres rejects that outright with "ON CONFLICT DO UPDATE
+   * command cannot affect row a second time" rather than deduplicating.
+   *
+   * The student-role join is the guard this codebase has been bitten by twice —
+   * the class teacher holds an active `class_members` row of their own, and
+   * without it `scope: 'all'` would mark the teacher complete on their own
+   * assignment.
+   */
+  public async bulkSetCompletion(
+    identity: AssignmentIdentity,
+    assignmentId: string,
+    scope: BulkCompletionScope,
+    completedAt: Date,
+  ): Promise<BulkCompletionOutcome | undefined> {
+    const assignment = await this.findManaged(identity, assignmentId);
+    if (assignment === undefined) return undefined;
+    const completedAtIso = completedAt.toISOString();
+    const rows = await this.db.execute(sql<{ studentId: string }>`
+      insert into public.assignment_submissions
+        (school_id, assignment_id, student_id, completed_at, updated_at)
+      select distinct
+        assignment.school_id,
+        assignment.id,
+        member.student_id,
+        ${completedAtIso}::timestamptz,
+        ${completedAtIso}::timestamptz
+      from public.assignments assignment
+      join public.class_members member
+        on member.school_id = assignment.school_id
+        and member.class_id = assignment.class_id
+        and member.is_active
+      join public.user_roles student_role
+        on student_role.user_id = member.student_id
+        and student_role.school_id = member.school_id
+        and student_role.role = 'student'
+        and student_role.is_active
+      join public.class_subjects subject
+        on subject.school_id = assignment.school_id
+        and subject.class_id = assignment.class_id
+        and subject.subject_id = assignment.subject_id
+        and subject.teacher_id = ${identity.userId}::uuid
+      where assignment.id = ${assignmentId}::uuid
+        and assignment.school_id = ${identity.schoolId}::uuid
+        and assignment.teacher_id = ${identity.userId}::uuid
+        and assignment.deleted_at is null
+        and (
+          ${scope}::text = 'all'
+          or exists (
+            select 1
+            from public.assignment_submissions submitted
+            where submitted.school_id = assignment.school_id
+              and submitted.assignment_id = assignment.id
+              and submitted.student_id = member.student_id
+              and submitted.submitted_at is not null
+          )
+        )
+      on conflict (assignment_id, student_id) do update
+        set completed_at = coalesce(
+              public.assignment_submissions.completed_at,
+              excluded.completed_at
+            ),
+            updated_at = excluded.updated_at
+      returning student_id as "studentId"
+    `) as unknown as ReadonlyArray<{ studentId: string }>;
+    return { studentIds: rows.map((row) => row.studentId) };
   }
 
   private completionAuthorization(identity: AssignmentIdentity) {
@@ -1414,7 +1741,8 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       select submission.id, submission.assignment_id as "assignmentId",
         submission.student_id as "studentId", profile.display_name as "studentName",
         submission.object_path as "objectPath", submission.submitted_at as "submittedAt",
-        submission.marks, submission.feedback, submission.graded_at as "gradedAt",
+        submission.marks, submission.letter_grade as "letterGrade",
+        submission.feedback, submission.graded_at as "gradedAt",
         submission.completed_at as "completedAt"
       from public.assignment_submissions submission
       join public.assignments assignment
@@ -1444,6 +1772,26 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
     displayName: string;
     identity: AssignmentIdentity;
     objectPath: string;
+    role: AssignmentResourceRole;
+    uploadSessionId: string;
+  }): Promise<StoredAssignmentResource | 'banner_taken' | undefined> {
+    try {
+      return await this.insertResourceRow(input);
+    } catch (error) {
+      // The one-banner-per-assignment index is the authority — a service-side
+      // "is there already a banner?" read cannot close the window between two
+      // concurrent confirms. The loser is reported as a conflict, not a 500.
+      if (isBannerConflict(error)) return 'banner_taken';
+      throw error;
+    }
+  }
+
+  private async insertResourceRow(input: {
+    assignmentId: string;
+    displayName: string;
+    identity: AssignmentIdentity;
+    objectPath: string;
+    role: AssignmentResourceRole;
     uploadSessionId: string;
   }): Promise<StoredAssignmentResource | undefined> {
     return this.db.transaction(async (transaction) => {
@@ -1453,14 +1801,16 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           assignment_id,
           upload_session_id,
           object_path,
-          display_name
+          display_name,
+          role
         )
         select
           ${input.identity.schoolId}::uuid,
           ${input.assignmentId}::uuid,
           ${input.uploadSessionId}::uuid,
           ${input.objectPath},
-          ${input.displayName}
+          ${input.displayName},
+          ${input.role}
         from public.assignments
         inner join public.class_subjects
           on class_subjects.school_id = assignments.school_id
@@ -1565,7 +1915,18 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       )));
   }
 
-  private gradeAuthorization(identity: AssignmentIdentity, marks: number) {
+  /**
+   * The grade write is only authorised for the SHAPE the assignment declares:
+   * numeric marks within `max_marks` on a `Numeric` assignment, a letter on an
+   * `Alphabetic` one. Both halves live in the predicate rather than in a
+   * service-side branch alone, so a mismatched body silently matches no row and
+   * becomes a 404/400 instead of writing a numeric mark onto an assignment that
+   * has no maximum to measure it against.
+   */
+  private gradeAuthorization(identity: AssignmentIdentity, input: GradeSubmissionInput) {
+    const shape = input.marks === undefined
+      ? eq(assignments.gradingType, 'Alphabetic')
+      : and(eq(assignments.gradingType, 'Numeric'), gte(assignments.maxMarks, input.marks));
     return exists(this.db
       .select({ id: assignments.id })
       .from(assignments)
@@ -1580,8 +1941,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         eq(assignments.schoolId, identity.schoolId),
         eq(assignments.teacherId, identity.userId),
         isNull(assignments.deletedAt),
-        eq(assignments.gradingType, 'Numeric'),
-        gte(assignments.maxMarks, marks),
+        shape,
       )));
   }
 
@@ -1641,6 +2001,7 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
           schoolId: assignmentResources.schoolId,
           name: assignmentResources.displayName,
           objectPath: assignmentResources.objectPath,
+          role: assignmentResources.role,
         })
         .from(assignmentResources)
         .where(and(
@@ -1649,8 +2010,15 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
         ))
         .orderBy(desc(assignmentResources.createdAt), desc(assignmentResources.id)),
     ]);
+    // The banner leaves the resources array here, once, rather than at each of
+    // the four call sites that build a detail — so no caller can forget and let
+    // the header image render a second time as a file tile.
+    const banner = resources.find((resource) => resource.role === 'banner');
     return {
       assignedAt: record.createdAt.toISOString(),
+      ...(banner === undefined ? {} : {
+        banner: { id: banner.id, name: banner.name, objectPath: banner.objectPath },
+      }),
       classId: record.classId,
       displayCode: record.displayCode,
       dueAt: record.dueAt.toISOString(),
@@ -1659,7 +2027,13 @@ export class DrizzleAssignmentsRepository implements AssignmentsRepository {
       instructions: record.instructions,
       isGradedAssignment: record.isGraded,
       ...(record.maxMarks === null ? {} : { maxMarks: record.maxMarks }),
-      resources,
+      resources: resources
+        .filter((resource) => resource.role !== 'banner')
+        .map((resource) => ({
+          id: resource.id,
+          name: resource.name,
+          objectPath: resource.objectPath,
+        })),
       rubrics: rubrics.map((rubric) => ({
         marks: rubric.marks,
         ...(rubric.moreInfo === null ? {} : { moreInfo: rubric.moreInfo }),

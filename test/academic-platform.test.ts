@@ -912,8 +912,11 @@ describe('academic cache degradation', () => {
       repository: { findForStudent } as unknown as AssignmentsRepository,
     });
 
+    // `bannerUrl` is resolved by the service, not stored on the record: a
+    // detail with no banner still states the absence, so the field is present
+    // and null rather than missing.
     await expect(assignmentDetailService.getForStudent({ schoolId, userId: studentId }, assignmentId))
-      .resolves.toEqual(assignment);
+      .resolves.toEqual({ ...assignment, banner: null, bannerUrl: null });
     expect(findForStudent).toHaveBeenCalledWith({ schoolId, userId: studentId }, assignmentId);
 
     const group = { id: 'group-1', title: 'Term one' };

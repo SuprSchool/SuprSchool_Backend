@@ -14,7 +14,10 @@ import type {
   AssignmentDetail,
   AssignmentIdentity,
   AssignmentResource,
+  AssignmentResourceRole,
   AssignmentSubmission,
+  BulkCompletionResult,
+  BulkCompletionScope,
   CreateAssignmentInput,
   CreateAssignmentResourceUploadInput,
   CreateSubmissionUploadInput,
@@ -30,6 +33,7 @@ import type {
   TeacherAssignmentListQuery,
   UpdateAssignmentInput,
 } from '../types/assignments.js';
+import { assignmentBannerContentTypes } from '../types/assignments.js';
 
 export type AcademicFileParent =
   | { parentId: string; parentType: 'assignment-resource' }
@@ -96,16 +100,37 @@ export interface AssignmentCachePort {
 }
 
 export interface AssignmentsService {
+  /**
+   * Marks a whole population complete in one call — `submitted` for the
+   * students who handed something in, `all` for the entire student-role-guarded
+   * roster.
+   */
+  bulkSetCompletion(
+    identity: AssignmentIdentity,
+    assignmentId: string,
+    scope: BulkCompletionScope,
+  ): Promise<BulkCompletionResult>;
   confirmResource(
     identity: AssignmentIdentity,
     assignmentId: string,
     uploadSessionId: string,
     idempotencyKey: string,
+    role?: AssignmentResourceRole,
   ): Promise<AssignmentResource>;
   confirmSubmission(
     identity: AssignmentIdentity,
     assignmentId: string,
     uploadSessionId: string,
+    idempotencyKey: string,
+  ): Promise<AssignmentSubmission>;
+  /**
+   * Submits with nothing attached — uploading work is optional. Returns the
+   * same `AssignmentSubmission` the confirm path returns, so a client parses
+   * one shape either way.
+   */
+  submitWithoutFile(
+    identity: AssignmentIdentity,
+    assignmentId: string,
     idempotencyKey: string,
   ): Promise<AssignmentSubmission>;
   create(
@@ -215,6 +240,33 @@ function invalidGrade(): AppError {
   return new AppError('VALIDATION_ERROR', 400, 'Marks are invalid for this assignment');
 }
 
+/**
+ * A numeric body on an alphabetic assignment or the reverse. Distinct from
+ * `invalidGrade` (a mark outside the maximum) so the teacher is told the grade
+ * is the wrong KIND, not the wrong size.
+ */
+function gradeSchemeMismatch(gradingType: string): AppError {
+  return new AppError(
+    'VALIDATION_ERROR',
+    400,
+    gradingType === 'Alphabetic'
+      ? 'This assignment is graded alphabetically — send letterGrade, not marks'
+      : 'This assignment is graded numerically — send marks, not letterGrade',
+  );
+}
+
+function bannerAlreadyExists(): AppError {
+  return new AppError(
+    'CONFLICT' as never,
+    409,
+    'This assignment already has a banner. Delete the existing banner first.',
+  );
+}
+
+function bannerMustBeImage(): AppError {
+  return new AppError('VALIDATION_ERROR', 400, 'A banner attachment must be an image');
+}
+
 const STUDENT_ASSIGNMENT_CACHE_TTL_SECONDS = 30;
 const STUDENT_ASSIGNMENT_CACHE_VERSION_TTL_SECONDS = 300;
 
@@ -245,11 +297,13 @@ interface CachedStudentAssignmentPage {
   audienceClassIds: ReadonlyArray<string>;
   page: CursorPage<StudentAssignmentItem>;
   /**
-   * Bumped to 2 when `assignedAt` joined `StudentAssignmentItem`. Entries
-   * written by the previous shape are rejected rather than served without a
-   * field the contract declares as always present.
+   * Bumped to 2 when `assignedAt` joined `StudentAssignmentItem`, and to 3 when
+   * `studentStatus` did. Entries written by a previous shape are rejected
+   * rather than served without a field the contract declares as always
+   * present — an entry cached seconds before a deploy would otherwise answer
+   * the new contract with the old shape for the whole of its 30-second life.
    */
-  version: 2;
+  version: 3;
 }
 
 function parseCachedJson<T>(value: string): T | undefined {
@@ -265,7 +319,7 @@ function readCachedStudentAssignmentPage(
     if (typeof parsed !== 'object' || parsed === null) return undefined;
     const cached = parsed as Partial<CachedStudentAssignmentPage>;
     if (
-      cached.version !== 2
+      cached.version !== 3
       || !Array.isArray(cached.audienceClassIds)
       || !cached.audienceClassIds.every((classId) => typeof classId === 'string')
       || typeof cached.page !== 'object'
@@ -293,10 +347,15 @@ function toSubmission(stored: StoredSubmission): AssignmentSubmission {
     ...(stored.feedback === undefined ? {} : { feedback: stored.feedback }),
     ...(stored.fileName === undefined ? {} : { fileName: stored.fileName }),
     ...(stored.gradedAt === undefined ? {} : { gradedAt: stored.gradedAt }),
+    ...(stored.gradingType === undefined ? {} : { gradingType: stored.gradingType }),
     id: stored.id,
     ...(stored.isGradedAssignment === undefined
       ? {}
       : { isGradedAssignment: stored.isGradedAssignment }),
+    ...(stored.letterGrade === undefined ? {} : { letterGrade: stored.letterGrade }),
+    ...(stored.letterGradeOptions === undefined
+      ? {}
+      : { letterGradeOptions: stored.letterGradeOptions }),
     ...(stored.marks === undefined ? {} : { marks: stored.marks }),
     ...(stored.maxMarks === undefined ? {} : { maxMarks: stored.maxMarks }),
     studentId: stored.studentId,
@@ -322,9 +381,31 @@ export function createAssignmentsService({
     };
   }
 
+  /**
+   * The banner's signed read URL. A signing failure degrades the header to
+   * "no banner" rather than failing the whole detail — the same call the
+   * submissions list makes for its file tiles, and for the same reason: one
+   * unreadable object must not blank a screen.
+   */
+  async function toBanner(stored: StoredAssignmentDetail): Promise<AssignmentResource | null> {
+    const banner = stored.banner;
+    if (banner === undefined) return null;
+    try {
+      return await toResource(banner);
+    } catch {
+      return null;
+    }
+  }
+
   async function toDetail(stored: StoredAssignmentDetail): Promise<AssignmentDetail> {
+    // Signed once and published twice. `bannerUrl` is the shipped contract and
+    // `banner` is the same row in the shape every other attachment has; both
+    // come from this single resolution, so they can never disagree.
+    const banner = await toBanner(stored);
     return {
       assignedAt: stored.assignedAt,
+      banner,
+      bannerUrl: banner === null ? null : banner.signedUrl,
       classId: stored.classId,
       displayCode: stored.displayCode,
       dueAt: stored.dueAt,
@@ -394,7 +475,7 @@ export function createAssignmentsService({
       const page = await repository.listForStudent(identity, query, clock());
       // Do not resurrect an invalidated cache namespace if a mutation committed during this read.
       if (await cacheGet(versionKey) === version) {
-        const value: CachedStudentAssignmentPage = { audienceClassIds, page, version: 2 };
+        const value: CachedStudentAssignmentPage = { audienceClassIds, page, version: 3 };
         await cacheSet(key, JSON.stringify(value), STUDENT_ASSIGNMENT_CACHE_TTL_SECONDS);
       }
       return page;
@@ -414,11 +495,25 @@ export function createAssignmentsService({
       // one student's submission state to every other student in the school
       // for the entry's lifetime.
       const ownSubmission = {
+        ...(assignment.completedAt === undefined ? {} : { completedAt: assignment.completedAt }),
         ...(assignment.gradedAt === undefined ? {} : { gradedAt: assignment.gradedAt }),
+        ...(assignment.letterGrade === undefined ? {} : { letterGrade: assignment.letterGrade }),
         ...(assignment.marks === undefined ? {} : { marks: assignment.marks }),
+        ...(assignment.studentStatus === undefined
+          ? {}
+          : { studentStatus: assignment.studentStatus }),
         ...(assignment.submittedAt === undefined ? {} : { submittedAt: assignment.submittedAt }),
       };
-      if (cachedDetail !== undefined && typeof cachedDetail.assignedAt === 'string') {
+      // An entry written before `bannerUrl` existed is a miss for the same
+      // reason `assignedAt` is: the field is declared always-present, so serving
+      // it absent would break the contract for the 30 seconds such an entry can
+      // outlive a deploy. `bannerUrl` is nullable, so presence — not truthiness
+      // — is what is tested.
+      if (
+        cachedDetail !== undefined
+        && typeof cachedDetail.assignedAt === 'string'
+        && 'bannerUrl' in cachedDetail
+      ) {
         return { ...cachedDetail, ...ownSubmission };
       }
       const detail = await toDetail(assignment);
@@ -568,6 +663,55 @@ export function createAssignmentsService({
       return result.body;
     },
 
+    // The fileless half of `confirmSubmission`, and deliberately its mirror
+    // image: same idempotency wrapper, same outbox event, same cache
+    // invalidation, same point award, same 201. The only thing missing is the
+    // storage round-trip, because there is no file — so a client that submits
+    // with an attachment and one that submits without parse one response shape.
+    async submitWithoutFile(identity, assignmentId, idempotencyKey) {
+      const result = await mutations.execute(identity, {
+        idempotencyKey,
+        requestBody: {},
+        successStatus: 201,
+        work: async () => {
+          const submitted = await repository.withTransaction(
+            async (transactionRepository, transaction) => {
+              const outcome = await transactionRepository.submitWithoutFile(
+                identity, assignmentId, clock(),
+              );
+              if (outcome === undefined) throw notFound();
+              // Only a submission that actually happened here is announced. A
+              // replay — or a student who had already uploaded a file — must
+              // not notify the teacher a second time about one submission.
+              if (outcome.justSubmitted) {
+                await outbox.writeInTransaction(transaction, identity, {
+                  aggregateId: outcome.submission.id,
+                  aggregateType: 'assignment-submission',
+                  eventType: 'assignment.submitted',
+                  payload: { assignmentId, studentId: outcome.submission.studentId },
+                });
+              }
+              return outcome.submission;
+            },
+          );
+          await invalidateStudentCache(assignmentId, submitted.studentId, identity.schoolId);
+          return toSubmission(submitted);
+        },
+      });
+      await pointAwards?.awardIfAbsent({
+        metadata: { assignmentId },
+        occurredAt: result.body.submittedAt === undefined
+          ? clock()
+          : new Date(result.body.submittedAt),
+        recipientUserId: result.body.studentId,
+        ruleCode: pointAwardRuleCodes.assignmentSubmitted,
+        schoolId: identity.schoolId,
+        sourceId: result.body.id,
+        sourceType: 'assignment_submission',
+      });
+      return result.body;
+    },
+
     async deleteResource(identity, assignmentId, resourceId, idempotencyKey) {
       await mutations.execute(identity, {
         idempotencyKey,
@@ -619,12 +763,18 @@ export function createAssignmentsService({
             async (transactionRepository, transaction) => {
               const gradeable = await transactionRepository.findGradeableSubmission(identity, submissionId);
               if (gradeable === undefined) throw notFound();
-              if (
-                gradeable.gradingType !== 'Numeric'
-                || gradeable.maxMarks === undefined
-                || input.marks > gradeable.maxMarks
-              ) {
-                throw invalidGrade();
+              // The body's shape must match the assignment's declared scheme.
+              // Previously this demanded `Numeric` unconditionally, which made
+              // an alphabetic assignment ungradable at all: every attempt was a
+              // 400, and the screen behind it had already fallen back to a
+              // numeric "0/0" control that could not produce a legal body.
+              if (gradeable.gradingType === 'Alphabetic') {
+                if (input.letterGrade === undefined) throw gradeSchemeMismatch('Alphabetic');
+              } else {
+                if (input.marks === undefined) throw gradeSchemeMismatch('Numeric');
+                if (gradeable.maxMarks === undefined || input.marks > gradeable.maxMarks) {
+                  throw invalidGrade();
+                }
               }
               const submission = await transactionRepository.grade(identity, submissionId, input, clock());
               if (submission === undefined) throw notFound();
@@ -655,7 +805,14 @@ export function createAssignmentsService({
         identity, submissionId, action, clock(),
       );
       if (completion === undefined) throw notFound();
-      return completion;
+      // Completion is a per-student field of the student's assignment list, so
+      // the write has to bump that student's cache namespace. Without this the
+      // student kept reading `studentStatus: 'submitted'` for up to 30 seconds
+      // after the teacher ticked them off — and up to 5 minutes on the detail.
+      await invalidateStudentCache(
+        completion.assignmentId, completion.studentId, identity.schoolId,
+      );
+      return { completedAt: completion.completedAt, id: completion.id };
     },
 
     // The same bookkeeping flag as `setCompletion`, addressed by student instead
@@ -668,7 +825,26 @@ export function createAssignmentsService({
         identity, assignmentId, studentId, action, clock(),
       );
       if (completion === undefined) throw notFound();
-      return completion;
+      await invalidateStudentCache(
+        completion.assignmentId, completion.studentId, identity.schoolId,
+      );
+      return { completedAt: completion.completedAt, id: completion.id };
+    },
+
+    // Same bookkeeping flag again, over a population. No idempotency wrapper and
+    // no outbox event, for the same reasons as the two single-student writes
+    // above: `complete` coalesces onto any existing instant so a replay is
+    // indistinguishable from the first call, and the student is not notified
+    // that a teacher ticked them off.
+    async bulkSetCompletion(identity, assignmentId, scope) {
+      const outcome = await repository.bulkSetCompletion(
+        identity, assignmentId, scope, clock(),
+      );
+      if (outcome === undefined) throw notFound();
+      await Promise.all(outcome.studentIds.map(async (studentId) => (
+        invalidateStudentCache(assignmentId, studentId, identity.schoolId)
+      )));
+      return { completed: outcome.studentIds.length, scope };
     },
 
     async remindStudent(identity, assignmentId, studentId, idempotencyKey) {
@@ -725,6 +901,15 @@ export function createAssignmentsService({
         requestBody: input,
         successStatus: 201,
         work: async () => {
+          // Told before the bytes move rather than after: the validator has
+          // already rejected a non-image banner, and this re-states it for any
+          // caller reaching the service directly.
+          if (
+            input.role === 'banner'
+            && !(assignmentBannerContentTypes as ReadonlyArray<string>).includes(input.contentType)
+          ) {
+            throw bannerMustBeImage();
+          }
           if (!await repository.canManage(identity, assignmentId)) throw cannotManage();
           const session = await files.createUpload(identity, {
             bucket: 'academic-files',
@@ -744,10 +929,10 @@ export function createAssignmentsService({
       return result.body;
     },
 
-    async confirmResource(identity, assignmentId, uploadSessionId, idempotencyKey) {
+    async confirmResource(identity, assignmentId, uploadSessionId, idempotencyKey, role = 'resource') {
       const result = await mutations.execute(identity, {
         idempotencyKey,
-        requestBody: { uploadSessionId },
+        requestBody: { role, uploadSessionId },
         successStatus: 201,
         recover: async () => {
           const resource = await repository.findResourceForUpload(identity, assignmentId, uploadSessionId);
@@ -762,13 +947,25 @@ export function createAssignmentsService({
             parentType: 'assignment-resource',
             uploadSessionId,
           });
+          // The content type is read back from the upload session rather than
+          // trusted from this request: the session is what the storage layer
+          // actually signed, so a client cannot declare `image/png` at confirm
+          // time and have uploaded a PDF.
+          if (
+            role === 'banner'
+            && !(assignmentBannerContentTypes as ReadonlyArray<string>).includes(session.contentType)
+          ) {
+            throw bannerMustBeImage();
+          }
           const resource = await repository.insertResource({
             assignmentId,
             displayName: session.displayName,
             identity,
             objectPath: session.objectPath,
+            role,
             uploadSessionId,
           });
+          if (resource === 'banner_taken') throw bannerAlreadyExists();
           if (resource === undefined) throw notFound();
           await files.finalizeUpload(identity, uploadSessionId);
           return toResource(resource);

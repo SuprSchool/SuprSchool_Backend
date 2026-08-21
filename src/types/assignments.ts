@@ -4,9 +4,53 @@ export const assignmentGradingTypeValues = ['Numeric', 'Alphabetic'] as const;
 export const studentAssignmentStatusValues = ['active', 'submitted', 'graded'] as const;
 export const teacherAssignmentStatusValues = ['active', 'graded'] as const;
 
+/**
+ * Where an attachment belongs on the detail screens. `banner` is the header
+ * image — it is surfaced as `AssignmentDetail.bannerUrl` and is deliberately
+ * *absent* from `AssignmentDetail.resources`, so a client that renders the
+ * resources array as file tiles never draws the header twice.
+ */
+export const assignmentResourceRoleValues = ['banner', 'resource'] as const;
+
+/**
+ * The banner is a header image, so only the image members of the academic
+ * content-type allowlist may claim the role. A PDF banner would render as a
+ * broken header on every detail screen.
+ */
+export const assignmentBannerContentTypes = ['image/jpeg', 'image/png', 'image/webp'] as const;
+
+/**
+ * The letter scale for `gradingType: 'Alphabetic'`. Pinned here rather than
+ * left free text so the teacher grading screen can render a fixed picker and
+ * the database check constraint has something to agree with.
+ */
+export const assignmentLetterGradeValues = [
+  'A+', 'A', 'B+', 'B', 'C+', 'C', 'D', 'E', 'F',
+] as const;
+
+/**
+ * The reading student's own progress on one assignment, resolved per student
+ * rather than per assignment:
+ *   `completed` — the teacher marked *this* student complete, whatever the rest
+ *                 of the class did;
+ *   `submitted` — this student has a durable submission but no completion;
+ *   `pending`   — neither.
+ * Completion outranks submission because it is the teacher's explicit closing
+ * of the row, and it is reachable without any upload at all.
+ */
+export const studentAssignmentProgressValues = ['pending', 'submitted', 'completed'] as const;
+
+/** The population a bulk completion addresses. */
+export const bulkCompletionScopeValues = ['submitted', 'all'] as const;
+
 export type AssignmentGradingType = (typeof assignmentGradingTypeValues)[number];
 export type StudentAssignmentStatus = (typeof studentAssignmentStatusValues)[number];
 export type TeacherAssignmentStatus = (typeof teacherAssignmentStatusValues)[number];
+export type AssignmentResourceRole = (typeof assignmentResourceRoleValues)[number];
+export type AssignmentBannerContentType = (typeof assignmentBannerContentTypes)[number];
+export type AssignmentLetterGrade = (typeof assignmentLetterGradeValues)[number];
+export type StudentAssignmentProgress = (typeof studentAssignmentProgressValues)[number];
+export type BulkCompletionScope = (typeof bulkCompletionScopeValues)[number];
 
 export interface AssignmentIdentity {
   schoolId: string;
@@ -54,6 +98,23 @@ export interface AssignmentDetail {
    * produce — so the stored timestamp rides the read model beside the date.
    */
   assignedAt: string;
+  /**
+   * The banner as a full resource — the same `{ id, name, signedUrl }` shape
+   * every other attachment has, so a client that already renders resources can
+   * reuse its mapper, and so the banner can be addressed by id for deletion.
+   * Emitted beside `bannerUrl`, not instead of it: clients read `bannerUrl`
+   * first and fall back to this, and the two are always derived from the same
+   * row, so they cannot disagree.
+   */
+  banner: AssignmentResource | null;
+  /**
+   * A resolvable read URL for the teacher-uploaded banner image, on BOTH the
+   * teacher and the student detail. Required-but-nullable rather than optional:
+   * "this assignment has no banner" is a state every caller must render, not a
+   * field a payload may omit. The banner is excluded from `resources`, so a
+   * client can render the array as file tiles without drawing the header twice.
+   */
+  bannerUrl: string | null;
   classId: string;
   /**
    * Human-readable code (ASG-<year>-<seq>), unique per school per year, printed
@@ -77,20 +138,46 @@ export interface AssignmentDetail {
    * these, so a detail without them always reads as "Not Submitted", including
    * on the confirmation screen shown straight after a successful submit.
    */
+  /** See `StudentAssignmentItem.completedAt` — the same field, student detail only. */
+  completedAt?: string | undefined;
   gradedAt?: string | undefined;
+  /** The letter awarded to the reading student on an alphabetic assignment. */
+  letterGrade?: AssignmentLetterGrade | undefined;
   marks?: number | undefined;
+  /**
+   * The same per-student verdict the list carries, so the detail screen and the
+   * card it was opened from cannot disagree. Student detail only — a teacher is
+   * not "a student" on their own assignment, so the field is absent there.
+   */
+  studentStatus?: StudentAssignmentProgress | undefined;
   submittedAt?: string | undefined;
 }
 
 export interface StudentAssignmentItem {
   /** See `AssignmentDetail.assignedAt` — the stored creation instant, not the due date. */
   assignedAt: string;
+  /**
+   * When the teacher marked THIS student complete, if they did. Redundant
+   * beside `studentStatus` and published anyway: it costs nothing (the column
+   * is already in the query `studentStatus` is derived from) and it is what an
+   * older client reads to reach the same conclusion.
+   */
+  completedAt?: string | undefined;
   dueAt: string;
   gradedAt?: string | undefined;
   gradingType: AssignmentGradingType;
   id: string;
   isGradedAssignment: boolean;
+  /** The letter awarded to this student on an alphabetic assignment. */
+  letterGrade?: AssignmentLetterGrade | undefined;
   marks?: number | undefined;
+  /**
+   * This student's own progress — see `studentAssignmentProgressValues`.
+   * Required, not optional: every card renders a state, and an absent field
+   * would be indistinguishable from "pending" while actually meaning "the
+   * server did not say".
+   */
+  studentStatus: StudentAssignmentProgress;
   subjectId: string;
   subjectName: string;
   submittedAt?: string | undefined;
@@ -146,6 +233,13 @@ export interface AssignmentSubmission {
   fileUrl?: string | undefined;
   gradedAt?: string | undefined;
   /**
+   * `assignments.grading_type`, denormalised onto every row beside `maxMarks`.
+   * Without it the grading screen had no way to tell a numeric assignment from
+   * an alphabetic one and drew every alphabetic assignment as numeric — and
+   * since an alphabetic assignment has no `maxMarks`, as "0/0".
+   */
+  gradingType?: AssignmentGradingType | undefined;
+  /**
    * The submission row id when the student has one, and the STUDENT id when the
    * roster read below produced a row for a student who never opened an upload
    * session. Callers that need to address a real submission (grading) must gate
@@ -157,11 +251,25 @@ export interface AssignmentSubmission {
    * submissions screen can pick its second tab (Graded vs Completed) without a
    * second fetch. */
   isGradedAssignment?: boolean | undefined;
+  /**
+   * The letter this student was awarded. Present only on a graded submission of
+   * an alphabetic assignment — the numeric counterpart of `marks`, and mutually
+   * exclusive with it.
+   */
+  letterGrade?: AssignmentLetterGrade | undefined;
+  /**
+   * The letters the teacher may choose from, carried on every row of an
+   * ALPHABETIC assignment for the same reason `maxMarks` is carried on a
+   * numeric one: the grading control has to be populated without a second
+   * fetch. Absent on a numeric assignment.
+   */
+  letterGradeOptions?: ReadonlyArray<AssignmentLetterGrade> | undefined;
   marks?: number | undefined;
   /**
    * `assignments.max_marks`, denormalised onto every row. 408:10557 draws
    * `0/35`, and with no total on the contract the client had nothing to divide
-   * by and pinned it to 0, which disabled marks entry entirely.
+   * by and pinned it to 0, which disabled marks entry entirely. Absent on an
+   * alphabetic assignment, which has no maximum — read `gradingType` first.
    */
   maxMarks?: number | undefined;
   studentId: string;
@@ -179,6 +287,16 @@ export interface AssignmentSubmission {
 export interface SubmissionCompletion {
   completedAt: string | null;
   id: string;
+}
+
+/**
+ * The outcome of a bulk mark-as-done. `completed` is the number of roster rows
+ * the write actually landed on, so a client can report "12 students marked"
+ * without re-reading the list.
+ */
+export interface BulkCompletionResult {
+  completed: number;
+  scope: BulkCompletionScope;
 }
 
 export interface StudentAssignmentListQuery {
@@ -224,7 +342,21 @@ export interface CreateSubmissionUploadInput {
   sizeBytes: number;
 }
 
-export type CreateAssignmentResourceUploadInput = CreateSubmissionUploadInput;
+export interface CreateAssignmentResourceUploadInput extends CreateSubmissionUploadInput {
+  /**
+   * Which slot the attachment claims. Defaulted by the validator, so the
+   * service always receives a concrete role and a client that never heard of
+   * banners keeps producing ordinary resources.
+   */
+  role: AssignmentResourceRole;
+}
+
+/** The confirm half of the same upload — the role is restated so the durable
+ * write knows the slot without the storage layer having to carry it. */
+export interface ConfirmAssignmentResourceInput {
+  role: AssignmentResourceRole;
+  uploadSessionId: string;
+}
 
 export interface SubmissionUploadSession {
   expiresAt: string;
@@ -232,9 +364,16 @@ export interface SubmissionUploadSession {
   signedUploadUrl: string;
 }
 
+/**
+ * Exactly one of `marks` / `letterGrade`, matching the assignment's own
+ * `gradingType` — enforced by the validator and again by the repository's
+ * authorization predicate, so a numeric grade can never be written onto an
+ * alphabetic assignment or the reverse.
+ */
 export interface GradeSubmissionInput {
   feedback?: string | undefined;
-  marks: number;
+  letterGrade?: AssignmentLetterGrade | undefined;
+  marks?: number | undefined;
 }
 
 const assignmentDueCursorSchema = z.object({

@@ -16,6 +16,14 @@ export function createAssignmentsRouter(
 
   router.get('/student/assignments', controller.listForStudent);
   router.get('/student/assignments/:assignmentId', controller.getForStudent);
+  // Submitting with nothing attached — uploading work is optional on graded and
+  // non-graded assignments alike. Registered BEFORE the two `/submission/...`
+  // routes for readability only; Express matches on the full path, so the
+  // bare `/submission` cannot shadow them.
+  router.post(
+    '/student/assignments/:assignmentId/submission',
+    controller.submitWithoutFile,
+  );
   router.post(
     '/student/assignments/:assignmentId/submission/upload-sessions',
     controller.createSubmissionUploadSession,
@@ -72,6 +80,19 @@ export function createAssignmentsRouter(
     '/teacher/assignments/:assignmentId/students/:studentId/completion',
     requireCapability('gradeSubmission'),
     controller.setStudentCompletion,
+  );
+  // Bulk mark-as-done. The unprefixed path is the shipped contract; the
+  // `/teacher`-prefixed alias below is the same handler under this router's own
+  // naming convention, so a caller that reaches for either finds it.
+  router.post(
+    '/assignments/:assignmentId/completions/bulk',
+    requireCapability('gradeSubmission'),
+    controller.bulkSetCompletion,
+  );
+  router.post(
+    '/teacher/assignments/:assignmentId/completions/bulk',
+    requireCapability('gradeSubmission'),
+    controller.bulkSetCompletion,
   );
   router.post(
     '/teacher/assignments/:assignmentId/reminder/student/:studentId',
